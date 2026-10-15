@@ -1301,18 +1301,24 @@ bool widgets_frame(int frame, std::string& error) {
     if (g_next_w > 0 && g_next_h > 0 && (g_next_w != g_applied_w || g_next_h != g_applied_h)) {
         gl_set_view(g_next_w, g_next_h);
         selection_set_view(g_next_w, g_next_h);
+        // Spring ViewResize(vsx, vsy). gui_fonthandler reads the second arg as vsy and
+        // crashes if we call it with no args (interactive/fullscreen resize path).
+        const double size[2] = {static_cast<double>(g_next_w), static_cast<double>(g_next_h)};
         if (!call_flow_resize(state, g_next_w, g_next_h, error) ||
-            !call_registry(state, "bar_ui_font", "ViewResize", nullptr, 0, false, error) ||
+            !call_registry(state, "bar_ui_font", "ViewResize", size, 2, false, error) ||
             !call_registry(state, "bar_ui_top", "ViewResize", nullptr, 0, true, error)) {
             return false;
         }
         g_current_widget = "bar_ui_select";
-        {
-            const double size[2] = {static_cast<double>(g_next_w), static_cast<double>(g_next_h)};
-            if (!call_registry(state, "bar_ui_select", "ViewResize", size, 2, false, error)) {
-                return false;
-            }
+        if (!call_registry(state, "bar_ui_select", "ViewResize", size, 2, false, error)) {
+            return false;
         }
+        g_current_widget = "bar_ui_grid";
+        call_registry(state, "bar_ui_grid", "ViewResize", nullptr, 0, false, error);
+        error.clear();
+        g_current_widget = "bar_ui_tooltip";
+        call_registry(state, "bar_ui_tooltip", "ViewResize", size, 2, false, error);
+        error.clear();
         g_current_widget = "bar_ui_minimap";
         if (!call_registry(state, "bar_ui_minimap", "ViewResize", nullptr, 0, false, error)) {
             return false;
@@ -1323,6 +1329,7 @@ bool widgets_frame(int frame, std::string& error) {
         }
         g_applied_w = g_next_w;
         g_applied_h = g_next_h;
+        std::cout << "widgets view " << g_applied_w << "x" << g_applied_h << "\n";
     }
     gl_begin_draw();
     const double game_frame = frame;

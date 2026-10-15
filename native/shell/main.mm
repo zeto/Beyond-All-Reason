@@ -795,6 +795,29 @@ int run_terrain(const Options& options, const std::string& game_name) {
     std::cout << "vsync: " << (layer.displaySyncEnabled ? "on" : "off") << "\n";
     std::cout.flush();
 
+    // Apply the live drawable size to Spring.GetViewGeometry / widget ViewResize.
+    // Widget bootstrap may have used a placeholder; interactive fullscreen (and any
+    // unlocked window) must see the real backing size, not a constant.
+    {
+        pump_events();
+        const CGFloat boot_scale = window.backingScaleFactor > 0 ? window.backingScaleFactor : 1;
+        if (locked) {
+            layer.contentsScale = 1;
+            layer.drawableSize = CGSizeMake(1280, 720);
+        } else {
+            layer.contentsScale = boot_scale;
+            layer.drawableSize =
+                CGSizeMake(view.bounds.size.width * boot_scale, view.bounds.size.height * boot_scale);
+        }
+        const int boot_w = static_cast<int>(layer.drawableSize.width);
+        const int boot_h = static_cast<int>(layer.drawableSize.height);
+        if (boot_w > 0 && boot_h > 0) {
+            bar::widgets_set_view(boot_w, boot_h);
+            std::cout << "drawable: " << boot_w << "x" << boot_h << "\n";
+            std::cout.flush();
+        }
+    }
+
     if (bookmark_mode) {
         const std::string shot_dir = options.screenshot_dir.empty() ? "native/oracle/out/m1" : options.screenshot_dir;
         std::error_code mkdir_error;
