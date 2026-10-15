@@ -1,0 +1,7 @@
+version: 2026.07.04
+source: https://github.com/beyond-all-reason/RecoilEngine/releases/tag/2026.07.04
+trace: captured
+binary: /Applications/BAR Launcher.app/Contents/MacOS/spring
+game: Beyond All Reason test-31578-8247b61
+method: mutator BAR Metal Oracle, commander samples echoed from the headed client
+scenarios: boot, move_kbot

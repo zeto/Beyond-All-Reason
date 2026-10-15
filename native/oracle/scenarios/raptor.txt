@@ -1,0 +1,36 @@
+[GAME]
+{
+	MapName=Supreme Isthmus v2.1;
+	StartPosType=0;
+	GameStartDelay=0;
+	[ALLYTEAM0]
+	{
+	}
+	[ALLYTEAM1]
+	{
+	}
+	[TEAM0]
+	{
+		AllyTeam=0;
+		TeamLeader=0;
+		Side=Armada;
+		RGBColor=0.90 0.15 0.12;
+		StartPosX=7600;
+		StartPosZ=4900;
+	}
+	[TEAM1]
+	{
+		AllyTeam=1;
+		TeamLeader=0;
+		Side=Armada;
+		LuaAI=RaptorsAI;
+		RGBColor=0.15 0.35 0.90;
+		StartPosX=6400;
+		StartPosZ=4200;
+	}
+	[PLAYER0]
+	{
+		Team=0;
+		Name=Player;
+	}
+}

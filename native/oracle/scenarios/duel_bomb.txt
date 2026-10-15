@@ -1,0 +1,42 @@
+[GAME]
+{
+	MapName=Supreme Isthmus v2.1;
+	StartPosType=0;
+	GameStartDelay=0;
+	[MODOPTIONS]
+	{
+		startmetal=100;
+		startenergy=900;
+	}
+	[ALLYTEAM0]
+	{
+	}
+	[TEAM0]
+	{
+		AllyTeam=0;
+		TeamLeader=0;
+		Side=Armada;
+		RGBColor=0.90 0.15 0.12;
+		StartPosX=7600;
+		StartPosZ=4900;
+	}
+	[UNIT0]
+	{
+		Def=corshad;
+		X=6800;
+		Z=3600;
+		Team=0;
+	}
+	[UNIT1]
+	{
+		Def=armfav;
+		X=6800;
+		Z=4340;
+		Team=1;
+	}
+	[PLAYER0]
+	{
+		Team=0;
+		Name=Player;
+	}
+}

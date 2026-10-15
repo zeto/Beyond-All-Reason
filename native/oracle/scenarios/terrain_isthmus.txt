@@ -1,0 +1,4 @@
+[GAME]
+{
+	MapName=Supreme Isthmus v2.1;
+}

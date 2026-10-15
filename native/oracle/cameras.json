@@ -1,0 +1,10 @@
+{
+  "map": "Supreme Isthmus v2.1",
+  "shots": [
+    {"id": "overview", "x": 6144, "z": 6144, "distance": 11000, "tilt": 0.62, "yaw": 0.2},
+    {"id": "shore", "x": 5824, "z": 4032, "distance": 1800, "tilt": 0.9, "yaw": 0.8},
+    {"id": "cliff", "x": 4864, "z": 8000, "distance": 1400, "tilt": 1.0, "yaw": 1.2},
+    {"id": "metal", "x": 7100, "z": 3500, "distance": 1600, "tilt": 0.85, "yaw": 0.4},
+    {"id": "commander", "x": 7600, "y": 90, "z": 4900, "distance": 400, "tilt": 1.0, "yaw": 3.1416}
+  ]
+}

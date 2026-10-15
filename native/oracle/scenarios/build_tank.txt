@@ -1,0 +1,35 @@
+[GAME]
+{
+	MapName=Supreme Isthmus v2.1;
+	StartPosType=0;
+	GameStartDelay=0;
+	[MODOPTIONS]
+	{
+		startmetal=100;
+		startenergy=900;
+	}
+	[ALLYTEAM0]
+	{
+	}
+	[TEAM0]
+	{
+		AllyTeam=0;
+		TeamLeader=0;
+		Side=Armada;
+		RGBColor=0.90 0.15 0.12;
+		StartPosX=7600;
+		StartPosZ=4900;
+	}
+	[UNIT0]
+	{
+		Def=armvp;
+		X=7280;
+		Z=4900;
+		Team=0;
+	}
+	[PLAYER0]
+	{
+		Team=0;
+		Name=Player;
+	}
+}

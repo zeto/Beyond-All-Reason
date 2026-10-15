@@ -1,0 +1,4 @@
+# frame unit x z
+0 1 6800 6400
+# frame unit attack targetIndex
+0 1 attack 2

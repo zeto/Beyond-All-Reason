@@ -1,0 +1,142 @@
+bar-metal is free software under the GNU General Public License, version 2
+or later. See the repository LICENSE.md.
+
+Piece matrices follow the order in Recoil's S3DModelPiece::ComposeTransform
+(parent, then translation, then Rz, Rx, Ry) and the Turn, Move, and Spin
+tick from Recoil's unit-script host. The comparison was against Recoil as
+of the pin in oracle/PIN (2026.07.04). No Recoil source file was copied
+into this tree. Sleep frame counts follow luarules/gadgets/unit_script.lua
+in this repository. Move-class water limits follow Spring's MoveDef
+defaults when a field is omitted (minimum -1e6, maximum 1e6). No Recoil
+source file was copied. Metal spot rings follow the strip grouping in
+common/upgets/api_resource_spot_finder.lua and the free-spot color in
+luaui/Widgets/gui_metalspots.lua. No Lua file was copied. A hover move
+class rides the water surface: travel height is 0 where the ground is
+below 0, and slope is measured on that surface. A gunship (canfly and
+hoverattack) cruises in a straight line at cruisealtitude above that
+surface and does not use the ground path. A fighter (canfly with
+hoverattack false) yaws at the lesser of maxrudder and speed/turnradius
+radians per frame while flying, banks toward that yaw at maxaileron up to
+maxbank, does not stop or snap on arrival, and holds the surface plus
+cruise with the climb capped by speed times tan(maxpitch). The air rework
+table is not applied. No Recoil source was copied. The cob host is an
+integer stack machine for version-4 bytecode. A full circle is 65536, a
+spin acceleration is added to the per-second speed every frame, and sleep
+frames follow unit_script.lua. No Recoil source was copied. Team metal
+and energy follow game_team_resources.lua: storage is the maximum of the
+gadget floor, the modoption storage, the starting stock, and the
+commander's storage. Each frame adds metalmake and energymake divided by
+30 and clamps to that storage. No Recoil source was copied. A metal
+extractor digs to extractsmetal over each metal-map square whose center
+is inside the map extractor radius. The square's metal is its byte times
+the map's maxmetal. A second extractor on that square receives only the
+depth the first one left. The team's frame pays the extractor's energy
+upkeep before adding that metal. No Recoil source was copied. An active
+building whose energyupkeep is negative adds the absolute value, times the
+energy production multiplier, as energy each second. An active wind
+generator adds the map wind, capped by its windgenerator after that same
+multiplier. The wind used here is the average of atmosphere minwind and
+maxwind, the strength at the start of a wind cycle. No Recoil source was
+copied. A builder spends workertime/30 of a nanoframe's build time each
+frame it is in range. The metal and energy for that whole step come out of
+the team stock after the frame's income, or the step is refused. A new
+frame starts at health 0.1. Construction decay, reclaim, repair, resurrect,
+and capture factors are the numbers in gamedata/modrules.lua. Ground
+leveling is not applied, so progress starts immediately. No Recoil source
+was copied. A factory spends workerTime/30 through the same path.
+Production starts immediately because the yard script is not hosted, and
+the finished unit is not walked out. No Recoil source was copied. A
+builder reclaims a wreck at reclaimSpeed/reclaimTime per frame, metal
+returns gradually because reclaimMethod is 0, the energy cost is
+featureEnergyCostFactor times the metal fraction and that float is charged
+to both resources, and the wreck metal is floor(metalcost *
+wreck_metal_ratio) rather than the raw feature metal. No Recoil source
+was copied. A LaserCannon fires reloadTime*30 frames apart, projectile
+speed is weaponVelocity/30, range rounds down to a multiple of that speed,
+burnblow defaults true so the lifetime is min(ceil(dist/speed),
+floor(range/speed)-1), and a surface hit deals the default damage. No
+Recoil source was copied. A Cannon uses map gravity -tag/(30*30),
+projectile speed is weaponVelocity/30, the low arc solves the discrete
+ballistic root, burnblow defaults false so ttl is 2*ceil(horiz/horizSpeed),
+and a surface hit deals the default damage. No Recoil source was copied.
+A BeamLaser with beamburst left false spreads damage.default across
+int(beamtime*30) consecutive frames, stamps reload on the first of those
+frames, scales each tick by max(minIntensity, 1 - rayEntry/(range*2)), and
+stops the rest of the salvo when the target dies. No Recoil source was copied.
+A MissileLauncher with trajectoryHeight left at 0, tracks left false,
+turnrate left at 0, and burnblow left false flies a straight rocket at
+startvelocity/30, caps at weaponvelocity/30, adds weaponacceleration/(30*30)
+only while still under that cap, lives ceil(max(distance, range)/maxSpeed)
+frames when flighttime is omitted, tests the current segment against the
+target box before moving, deals damage.default on entry, and is removed
+when ttl hits 0 instead of falling under gravity. No Recoil source was copied.
+A LightningCannon with heightmod left at 1, impactOnly set, and spray left
+at 0 traces one hitscan bolt per burst tick. The tick gap is int(burstRate*30).
+Reload is max(1, int(reloadTime*30)) and starts on the frame the burst is
+accepted. energyPerShot is spent once for that burst. A bolt that enters the
+target box deals damage.default. A bolt that meets the water plane first
+deals nothing. The rest of the burst stops when the target dies. No Recoil
+source was copied.
+A Flame with spray left at 0 and accuracy left at 0 flies one particle per
+burst tick at weaponvelocity/30. The tick gap is int(burstRate*30). Reload
+is max(1, int(reloadTime*30)) and starts on the frame the burst is accepted.
+Lifetime is ceil(max(distance, range) / projectileSpeed * flameGfxTime). The
+segment from the current position through this frame's speed is tested
+before the move. A hit deals damage.default and removes the particle. Each
+miss then adds -dir*0.001 to the velocity. Particles still in flight are
+dropped on the frame after the target dies. No Recoil source was copied.
+A TorpedoLauncher with tracks left off flies one shot per reload at
+startvelocity/30, adding 0.2 per powered update while under
+weaponvelocity/30. Fuel is int(flighttime*30). The segment from the current
+position through the pre-thrust speed is tested before the speed add and the
+move. A hit deals damage.default and removes the shot. Past fuel the shot
+drags by 0.98 and takes map gravity, and it is not deleted until it hits.
+Shots still in flight are dropped on the frame after the target dies. No
+Recoil source was copied.
+An AircraftBomb with spray left at 0 and accuracy left at 0 drops one bomb
+per burst tick once the predicted landing is inside the drop window. The
+tick gap is int(burstRate*30). Reload is int(reloadTime*30) and starts on
+the frame the burst is accepted. The bomb inherits the airplane velocity.
+Map gravity is added after the segment test. ttl is 1000. A hit deals
+damage.default and removes that bomb. Bombs still in flight are dropped on
+the frame after the target dies. No Recoil source was copied.
+A DGun with spray left at 0 and accuracy left at 0 flies one fireball per
+reload at weaponvelocity/30. Reload is max(1, int(reloadTime*30)). The
+segment from the current position through this frame's speed is tested
+before the move. Map gravity is added after the move. noexplode keeps the
+shot alive across overlaps. The shot is removed once it has traveled
+farther than the weapon range, and that removal is not a ground hit. A hit
+deals damage.default. Shots still in flight are dropped on the frame after
+the target dies. No Recoil source was copied.
+Ground LOS walks squares of size mapSquare * 2^losMipLevel. A square
+between two ground units blocks sight when its terrain is above the line
+joining the tops of their collision boxes. A target past sightdistance is
+not targetable. Aircraft and underwater units are outside this test. No
+Recoil source was copied.
+A death leaves one corpse at the unit position. The corpse is not a unit
+and it does not pay the team. When the unit is not a commander or an
+effigy and it has health and both costs, corpse metal is floor(metalcost *
+wreckRatio). Otherwise the file feature metal is kept. No Recoil source
+was copied.
+The synced spawn and team-resource gadgets run before the first tick.
+CreateUnit binds a commander this process already placed. The hide,
+paralyze, and movectrl requests are recorded and not applied. No Recoil
+source was copied.
+The synced UnitPreDamaged gadgets for paralyze, land damage, the
+commander blast, stomp, the D-Gun, and the paralyze limit are asked when
+native damage is applied. A different return is recorded and not applied.
+The D-Gun projectile ground-hug is not driven. No Recoil source was copied.
+SimpleAI is loaded on every run. A build order is walked and then spent
+as a nanoframe. A finished extractor, solar, or wind generator is credited
+to that team's row. A lab builds the same way. The extra units are not
+drawn. No Recoil source was copied.
+The scavenger and raptor spawner gadgets load on every run. A game that
+is not that mode returns false before the spawn config. The mode
+commander is destroyed. A later CreateUnit adds the spawned structure and
+does not draw it. Ground sight and radar walk the same los squares as the
+weapon check, from the unit's emit height. Air sight and sonar are
+circles of the file radius. No Recoil source was copied. Json is the
+stock include common/luaUtilities/json.lua. No copy of that file was made.
+
+third_party/lua-5.1.5 is PUC Lua 5.1.5, Copyright (C) 1994-2012 Lua.org,
+PUC-Rio, under the MIT license included in that directory.

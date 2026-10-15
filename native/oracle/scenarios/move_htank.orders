@@ -1,0 +1,5 @@
+# frame unit x z
+# Due east onto a shelf the class can wade and the unit-file limits cannot.
+# The second cell is deeper than 20, so the path must refuse it.
+0 0 1200 2352
+180 0 1200 2224
