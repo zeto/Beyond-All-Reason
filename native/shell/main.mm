@@ -72,6 +72,7 @@ struct Options {
     std::string input;
     std::string pieces;
     bool lock_camera = false;
+    bool check_hud_text = false;
     int frames = 0;
 };
 
@@ -79,7 +80,8 @@ void usage() {
     std::cerr << "bar-metal [--gamedata DIR] [--frames N] [--screenshot FILE.ppm]\n"
               << "          [--startscript FILE] [--mapdir DIR]\n"
               << "          [--bookmarks FILE] [--screenshot-dir DIR] [--trace FILE]\n"
-              << "          [--orders FILE] [--input FILE] [--pieces FILE] [--lock-camera]\n";
+              << "          [--orders FILE] [--input FILE] [--pieces FILE] [--lock-camera]\n"
+              << "          [--check-hud-text]\n";
 }
 
 bool parse_args(int argc, char** argv, Options& options) {
@@ -160,6 +162,8 @@ bool parse_args(int argc, char** argv, Options& options) {
             options.pieces = value;
         } else if (arg == "--lock-camera") {
             options.lock_camera = true;
+        } else if (arg == "--check-hud-text") {
+            options.check_hud_text = true;
         } else if (arg == "--help") {
             usage();
             return false;
@@ -1672,6 +1676,16 @@ int main(int argc, char** argv) {
         } catch (const std::exception& ex) {
             std::cerr << ex.what() << "\n";
             return 1;
+        }
+
+        if (options.check_hud_text) {
+            std::string hud_error;
+            if (!bar::check_hud_text(hud_error)) {
+                std::cerr << "check-hud-text: " << hud_error << "\n";
+                return 1;
+            }
+            std::cout << "check-hud-text ok\n";
+            return 0;
         }
 
         std::string game_name;

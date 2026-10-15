@@ -49,4 +49,8 @@ private:
     void encode_hud(void* command_buffer, void* target);
 };
 
+// Renders HudText samples with Spring \255RGB codes and invalid UTF-8.
+// Returns false only if rasterization fails (must not SIGSEGV).
+bool check_hud_text(std::string& error);
+
 }  // namespace bar

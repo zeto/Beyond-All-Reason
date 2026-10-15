@@ -512,16 +512,35 @@ float lua_num(lua_State* state, int index, float fallback) {
     return static_cast<float>(lua_tonumber(state, index));
 }
 
+// Spring inline colors: \255 r g b (byte 255 + 3 channels). \008 resets to white.
+// Codes may appear mid-string (tooltips); leaving 0xFF in the payload makes
+// CFStringCreateWithBytes(UTF-8) return NULL and crash CoreText.
 std::string visible_text(const char* raw, size_t length, float& r, float& gch, float& b, float& a) {
+    std::string out;
+    out.reserve(length);
     size_t i = 0;
-    while (i + 3 < length && static_cast<unsigned char>(raw[i]) == 255) {
-        r = static_cast<unsigned char>(raw[i + 1]) / 255.f;
-        gch = static_cast<unsigned char>(raw[i + 2]) / 255.f;
-        b = static_cast<unsigned char>(raw[i + 3]) / 255.f;
-        a = 1.f;
-        i += 4;
+    while (i < length) {
+        const unsigned char c = static_cast<unsigned char>(raw[i]);
+        if (c == 255 && i + 3 < length) {
+            r = static_cast<unsigned char>(raw[i + 1]) / 255.f;
+            gch = static_cast<unsigned char>(raw[i + 2]) / 255.f;
+            b = static_cast<unsigned char>(raw[i + 3]) / 255.f;
+            a = 1.f;
+            i += 4;
+            continue;
+        }
+        if (c == 8) {
+            r = 1.f;
+            gch = 1.f;
+            b = 1.f;
+            a = 1.f;
+            ++i;
+            continue;
+        }
+        out.push_back(static_cast<char>(c));
+        ++i;
     }
-    return std::string(raw + i, length - i);
+    return out;
 }
 
 std::string font_file(lua_State* state, int self) {

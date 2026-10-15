@@ -380,19 +380,88 @@ CTFontRef hud_font(const std::string& path, float size) {
     return CTFontCreateWithName(CFSTR("Helvetica"), size, nullptr);
 }
 
+// Never hand CoreText a NULL CFString (UTF-8 reject of Spring \255 color bytes).
+CFStringRef cfstring_lossy(const std::string& text) {
+    const UInt8* bytes = reinterpret_cast<const UInt8*>(text.data());
+    const CFIndex n = static_cast<CFIndex>(text.size());
+    CFStringRef chars =
+        CFStringCreateWithBytes(kCFAllocatorDefault, bytes, n, kCFStringEncodingUTF8, false);
+    if (chars != nullptr) {
+        return chars;
+    }
+    chars = CFStringCreateWithBytes(kCFAllocatorDefault, bytes, n, kCFStringEncodingISOLatin1, false);
+    if (chars != nullptr) {
+        return chars;
+    }
+    std::string safe;
+    safe.reserve(text.size());
+    for (unsigned char c : text) {
+        if (c >= 0x20 && c < 0x80) {
+            safe.push_back(static_cast<char>(c));
+        } else if (c == '\n' || c == '\t') {
+            safe.push_back(static_cast<char>(c));
+        } else {
+            safe.push_back('?');
+        }
+    }
+    return CFStringCreateWithBytes(kCFAllocatorDefault, reinterpret_cast<const UInt8*>(safe.data()),
+                                   static_cast<CFIndex>(safe.size()), kCFStringEncodingUTF8, false);
+}
+
+// Strip any leftover Spring color/control bytes before CoreText (defense in depth).
+std::string hud_plain(const std::string& text, float& r, float& g, float& b, float& a) {
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size();) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c == 255 && i + 3 < text.size()) {
+            r = static_cast<unsigned char>(text[i + 1]) / 255.f;
+            g = static_cast<unsigned char>(text[i + 2]) / 255.f;
+            b = static_cast<unsigned char>(text[i + 3]) / 255.f;
+            a = 1.f;
+            i += 4;
+            continue;
+        }
+        if (c == 8) {
+            r = g = b = a = 1.f;
+            ++i;
+            continue;
+        }
+        out.push_back(static_cast<char>(c));
+        ++i;
+    }
+    return out;
+}
+
 CTLineRef hud_line(CTFontRef font, const std::string& text, float r, float g, float b, float a) {
-    CFStringRef chars = CFStringCreateWithBytes(kCFAllocatorDefault, reinterpret_cast<const UInt8*>(text.data()),
-                                                 static_cast<CFIndex>(text.size()), kCFStringEncodingUTF8, false);
-    CGColorRef color = CGColorCreateGenericRGB(r, g, b, a);
+    float cr = r;
+    float cg = g;
+    float cb = b;
+    float ca = a;
+    const std::string plain = hud_plain(text, cr, cg, cb, ca);
+    CFStringRef chars = cfstring_lossy(plain);
+    if (chars == nullptr) {
+        return nullptr;
+    }
+    CGColorRef color = CGColorCreateGenericRGB(cr, cg, cb, ca);
     const void* keys[] = {kCTFontAttributeName, kCTForegroundColorAttributeName};
     const void* values[] = {font, color};
     CFDictionaryRef attrs = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 2, &kCFTypeDictionaryKeyCallBacks,
                                                &kCFTypeDictionaryValueCallBacks);
-    CFAttributedStringRef run = CFAttributedStringCreate(kCFAllocatorDefault, chars, attrs);
-    CTLineRef line = CTLineCreateWithAttributedString(run);
-    CFRelease(run);
-    CFRelease(attrs);
-    CGColorRelease(color);
+    CFAttributedStringRef run = nullptr;
+    if (attrs != nullptr) {
+        run = CFAttributedStringCreate(kCFAllocatorDefault, chars, attrs);
+    }
+    CTLineRef line = run != nullptr ? CTLineCreateWithAttributedString(run) : nullptr;
+    if (run != nullptr) {
+        CFRelease(run);
+    }
+    if (attrs != nullptr) {
+        CFRelease(attrs);
+    }
+    if (color != nullptr) {
+        CGColorRelease(color);
+    }
     CFRelease(chars);
     return line;
 }
@@ -1332,5 +1401,47 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     }
     return true;
 }
+
+bool check_hud_text(std::string& error) {
+    // Samples that used to SIGSEGV: Spring \255RGB mid-string, and non-UTF8 bytes.
+    const unsigned char colored[] = {
+        'H', 'P', ':', ' ', 255, 255, 100, 100, '5', '0', '0', 8, ' ', 'o', 'k', 0,
+    };
+    const unsigned char junk[] = {0xff, 0xfe, 'x', 0x80, 'y', 0};
+    struct Case {
+        const char* label;
+        std::string text;
+        float r, g, b;
+    };
+    const Case cases[] = {
+        {"leading-color", std::string("\xff\xff\xff\x00Metal", 9), 1.f, 1.f, 1.f},
+        {"mid-color", std::string(reinterpret_cast<const char*>(colored)), 1.f, 1.f, 1.f},
+        {"invalid-utf8", std::string(reinterpret_cast<const char*>(junk)), 1.f, 0.8f, 0.2f},
+        {"empty-ok", std::string("plain"), 0.2f, 0.9f, 0.3f},
+    };
+    for (const Case& c : cases) {
+        HudText text;
+        text.text = c.text;
+        text.x = 10.f;
+        text.y = 10.f;
+        text.size = 18.f;
+        text.r = c.r;
+        text.g = c.g;
+        text.b = c.b;
+        text.a = 1.f;
+        text.outline = true;
+        GlyphImage image;
+        if (!raster_glyph(text, image)) {
+            error = std::string("hud text raster failed: ") + c.label;
+            return false;
+        }
+        if (image.width < 1 || image.height < 1 || image.pixels.empty()) {
+            error = std::string("hud text empty bitmap: ") + c.label;
+            return false;
+        }
+    }
+    return true;
+}
+
 
 }  // namespace bar

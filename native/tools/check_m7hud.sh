@@ -11,6 +11,11 @@ if pgrep -x bar-metal >/dev/null || pgrep -x spring >/dev/null; then
 fi
 
 mkdir -p "$OUT"
+
+# Spring \255RGB / invalid UTF-8 must not SIGSEGV in CoreText HUD raster.
+"$BIN" --check-hud-text | tee "$OUT/hud-text.log"
+grep -q "check-hud-text ok" "$OUT/hud-text.log"
+
 "$BIN" \
   --startscript "$ROOT/native/oracle/scenarios/boot.txt" \
   --mapdir "$MAPDIR" \
