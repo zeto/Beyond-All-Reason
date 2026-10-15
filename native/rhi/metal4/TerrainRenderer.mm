@@ -408,61 +408,73 @@ CFStringRef cfstring_lossy(const std::string& text) {
                                    static_cast<CFIndex>(safe.size()), kCFStringEncodingUTF8, false);
 }
 
-// Strip any leftover Spring color/control bytes before CoreText (defense in depth).
-std::string hud_plain(const std::string& text, float& r, float& g, float& b, float& a) {
-    std::string out;
-    out.reserve(text.size());
-    for (size_t i = 0; i < text.size();) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
-        if (c == 255 && i + 3 < text.size()) {
-            r = static_cast<unsigned char>(text[i + 1]) / 255.f;
-            g = static_cast<unsigned char>(text[i + 2]) / 255.f;
-            b = static_cast<unsigned char>(text[i + 3]) / 255.f;
-            a = 1.f;
-            i += 4;
-            continue;
-        }
-        if (c == 8) {
-            r = g = b = a = 1.f;
-            ++i;
-            continue;
-        }
-        out.push_back(static_cast<char>(c));
-        ++i;
-    }
-    return out;
-}
-
+// Spring \255RGB applies a mid-string color; \008 resets to the Print base color.
+// Build one CTLine with per-run foreground colors (do not strip to a single tint).
 CTLineRef hud_line(CTFontRef font, const std::string& text, float r, float g, float b, float a) {
+    CFMutableAttributedStringRef attr = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0);
+    if (attr == nullptr) {
+        return nullptr;
+    }
     float cr = r;
     float cg = g;
     float cb = b;
     float ca = a;
-    const std::string plain = hud_plain(text, cr, cg, cb, ca);
-    CFStringRef chars = cfstring_lossy(plain);
-    if (chars == nullptr) {
-        return nullptr;
+    std::string run;
+    run.reserve(text.size());
+    auto flush = [&]() {
+        if (run.empty()) {
+            return;
+        }
+        CFStringRef chars = cfstring_lossy(run);
+        run.clear();
+        if (chars == nullptr) {
+            return;
+        }
+        const CFIndex start = CFAttributedStringGetLength(attr);
+        CFAttributedStringReplaceString(attr, CFRangeMake(start, 0), chars);
+        const CFIndex len = CFStringGetLength(chars);
+        CFRelease(chars);
+        if (len <= 0) {
+            return;
+        }
+        const CFRange range = CFRangeMake(start, len);
+        CFAttributedStringSetAttribute(attr, range, kCTFontAttributeName, font);
+        CGColorRef color = CGColorCreateGenericRGB(cr, cg, cb, ca);
+        if (color != nullptr) {
+            CFAttributedStringSetAttribute(attr, range, kCTForegroundColorAttributeName, color);
+            CGColorRelease(color);
+        }
+    };
+    for (size_t i = 0; i < text.size();) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c == 255 && i + 3 < text.size()) {
+            flush();
+            cr = static_cast<unsigned char>(text[i + 1]) / 255.f;
+            cg = static_cast<unsigned char>(text[i + 2]) / 255.f;
+            cb = static_cast<unsigned char>(text[i + 3]) / 255.f;
+            ca = 1.f;
+            i += 4;
+            continue;
+        }
+        if (c == 8) {
+            flush();
+            // Reset to the font Print color (Spring ColorReset → defaultColor).
+            cr = r;
+            cg = g;
+            cb = b;
+            ca = a;
+            ++i;
+            continue;
+        }
+        run.push_back(static_cast<char>(c));
+        ++i;
     }
-    CGColorRef color = CGColorCreateGenericRGB(cr, cg, cb, ca);
-    const void* keys[] = {kCTFontAttributeName, kCTForegroundColorAttributeName};
-    const void* values[] = {font, color};
-    CFDictionaryRef attrs = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 2, &kCFTypeDictionaryKeyCallBacks,
-                                               &kCFTypeDictionaryValueCallBacks);
-    CFAttributedStringRef run = nullptr;
-    if (attrs != nullptr) {
-        run = CFAttributedStringCreate(kCFAllocatorDefault, chars, attrs);
+    flush();
+    CTLineRef line = nullptr;
+    if (CFAttributedStringGetLength(attr) > 0) {
+        line = CTLineCreateWithAttributedString(attr);
     }
-    CTLineRef line = run != nullptr ? CTLineCreateWithAttributedString(run) : nullptr;
-    if (run != nullptr) {
-        CFRelease(run);
-    }
-    if (attrs != nullptr) {
-        CFRelease(attrs);
-    }
-    if (color != nullptr) {
-        CGColorRelease(color);
-    }
-    CFRelease(chars);
+    CFRelease(attr);
     return line;
 }
 

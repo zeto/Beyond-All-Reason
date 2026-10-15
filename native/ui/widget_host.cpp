@@ -55,6 +55,9 @@ float g_view_proj[16] = {};
 bool g_have_view_proj = false;
 bool g_grid_draw = true;
 bool g_grid_update = true;
+bool g_volume_draw = true;
+bool g_cursor_update = false;
+bool g_screenmode_draw = true;
 
 
 int lua_error_handler(lua_State* state) {
@@ -293,7 +296,7 @@ int ui_subdirs(lua_State* state) {
         if (!it->is_directory(kind) || kind) {
             continue;
         }
-        names.push_back(std::string(relative) + "/" + it->path().filename().string());
+        names.push_back(std::string(relative) + "/" + it->path().filename().string() + "/");
     }
     int count = 0;
     for (const std::string& name : names) {
@@ -597,6 +600,10 @@ int ui_handler_update_callin(lua_State* state) {
         } else if (callin == "Update") {
             g_minimap_update = true;
         }
+    } else if (g_current_widget == "bar_ui_cursor") {
+        if (callin == "Update") {
+            g_cursor_update = true;
+        }
     }
     return 0;
 }
@@ -624,6 +631,10 @@ int ui_handler_remove_callin(lua_State* state) {
             g_minimap_draw = false;
         } else if (callin == "Update") {
             g_minimap_update = false;
+        }
+    } else if (g_current_widget == "bar_ui_cursor") {
+        if (callin == "Update") {
+            g_cursor_update = false;
         }
     }
     return 0;
@@ -990,6 +1001,50 @@ int ui_handler_is_modal_active(lua_State* state) {
     return 1;
 }
 
+
+int ui_get_menu_name(lua_State* state) {
+    (void)state;
+    lua_pushstring(state, "");
+    return 1;
+}
+
+int ui_send_lua_menu_msg(lua_State* state) {
+    (void)state;
+    return 0;
+}
+
+int ui_assign_mouse_cursor(lua_State* state) {
+    (void)state;
+    return 0;
+}
+
+int ui_get_map_draw_mode(lua_State* state) {
+    (void)state;
+    lua_pushstring(state, "normal");
+    return 1;
+}
+
+int ui_register_modal_window(lua_State* state) {
+    (void)state;
+    return 0;
+}
+
+int ui_handler_get_view_sizes(lua_State* state) {
+    lua_pushnumber(state, gl_view_width());
+    lua_pushnumber(state, gl_view_height());
+    return 2;
+}
+
+int gl_config_minimap(lua_State* state) {
+    const int px = lua_isnumber(state, 1) != 0 ? static_cast<int>(lua_tonumber(state, 1)) : 0;
+    const int py_top = lua_isnumber(state, 2) != 0 ? static_cast<int>(lua_tonumber(state, 2)) : 0;
+    const int sx = lua_isnumber(state, 3) != 0 ? static_cast<int>(lua_tonumber(state, 3)) : 0;
+    const int sy = lua_isnumber(state, 4) != 0 ? static_cast<int>(lua_tonumber(state, 4)) : 0;
+    const int py_bottom = gl_view_height() - py_top - sy;
+    minimap_set_geometry(px, py_bottom, sx, sy);
+    return 0;
+}
+
 bool install_widget_handler(lua_State* state, std::string& error) {
     lua_newtable(state);
     lua_pushcfunction(state, ui_handler_update_callin);
@@ -1004,6 +1059,12 @@ bool install_widget_handler(lua_State* state, std::string& error) {
     lua_setfield(state, -2, "RegisterUnitCommand");
     lua_pushcfunction(state, ui_handler_is_modal_active);
     lua_setfield(state, -2, "IsModalActive");
+    lua_pushcfunction(state, ui_handler_action_add);
+    lua_setfield(state, -2, "AddAction");
+    lua_pushcfunction(state, ui_register_modal_window);
+    lua_setfield(state, -2, "RegisterModalWindow");
+    lua_pushcfunction(state, ui_handler_get_view_sizes);
+    lua_setfield(state, -2, "GetViewSizes");
     lua_newtable(state);
     lua_pushcfunction(state, ui_handler_action_add);
     lua_setfield(state, -2, "AddAction");
@@ -1032,6 +1093,8 @@ bool widgets_load(lua_State* state, const WidgetEnv& env, std::string& error) {
         lua_setfield(state, -2, "SlaveMiniMap");
         lua_pushcfunction(state, gl_draw_minimap);
         lua_setfield(state, -2, "DrawMiniMap");
+        lua_pushcfunction(state, gl_config_minimap);
+        lua_setfield(state, -2, "ConfigMiniMap");
     }
     lua_pop(state, 1);
 
@@ -1191,6 +1254,10 @@ os.clock = os.clock or function() return 0 end
     set_spring(state, "GetAllUnits", ui_get_all_units);
     set_spring(state, "GetMiniMapRotation", ui_get_minimap_rotation);
     set_spring(state, "GetActiveCommand", ui_get_active_command_build);
+    set_spring(state, "GetMenuName", ui_get_menu_name);
+    set_spring(state, "SendLuaMenuMsg", ui_send_lua_menu_msg);
+    set_spring(state, "AssignMouseCursor", ui_assign_mouse_cursor);
+    set_spring(state, "GetMapDrawMode", ui_get_map_draw_mode);
     set_vfs(state, "SubDirs", ui_subdirs);
     set_vfs(state, "DirList", ui_dir_list);
     set_vfs(state, "LoadFile", ui_load_file);
@@ -1203,6 +1270,24 @@ os.clock = os.clock or function() return 0 end
     }
 
     if (!install_widget_handler(state, error)) {
+        return false;
+    }
+
+    if (!run_chunk(state, R"LUA(
+Game = Game or {}
+Game.textColorCodes = Game.textColorCodes or {
+  Color = string.char(255),
+  ColorAndOutline = string.char(254),
+  Reset = string.char(8),
+}
+os = os or {}
+os.date = os.date or function() return "19700101_000000" end
+local sf = VFS.Include("common/springFunctions.lua")
+BAR = BAR or {}
+BAR.Utilities = sf.Utilities
+BAR.Debug = sf.Debug
+)LUA",
+                            error)) {
         return false;
     }
 
@@ -1241,7 +1326,11 @@ end
     const std::string select_path = env.game_root + "/luaui/Widgets/gui_selectionbox.lua";
     const std::string grid_path = env.game_root + "/luaui/Widgets/gui_gridmenu.lua";
     const std::string minimap_path = env.game_root + "/luaui/Widgets/gui_minimap.lua";
+    const std::string relative_path = env.game_root + "/luaui/Widgets/minimap_relative.lua";
     const std::string tip_path = env.game_root + "/luaui/Widgets/gui_tooltip.lua";
+    const std::string volume_path = env.game_root + "/luaui/Widgets/snd_volume_osd.lua";
+    const std::string cursor_path = env.game_root + "/luaui/Widgets/gui_cursor.lua";
+    const std::string screen_path = env.game_root + "/luaui/Widgets/gui_screen_mode_info.lua";
     build_cmd_set_root(env.game_root);
     hud_status_set_root(env.game_root);
     hud_status_reset();
@@ -1251,7 +1340,11 @@ end
         !load_widget(state, select_path, "bar_ui_select", error) ||
         !load_widget(state, grid_path, "bar_ui_grid", error) ||
         !load_widget(state, tip_path, "bar_ui_tooltip", error) ||
-        !load_widget(state, minimap_path, "bar_ui_minimap", error)) {
+        !load_widget(state, relative_path, "bar_ui_relative", error) ||
+        !load_widget(state, minimap_path, "bar_ui_minimap", error) ||
+        !load_widget(state, volume_path, "bar_ui_volume", error) ||
+        !load_widget(state, cursor_path, "bar_ui_cursor", error) ||
+        !load_widget(state, screen_path, "bar_ui_screenmode", error)) {
         return false;
     }
     if (!call_registry(state, "bar_ui_font", "Initialize", nullptr, 0, true, error) ||
@@ -1275,10 +1368,29 @@ end
     if (!call_registry(state, "bar_ui_tooltip", "Initialize", nullptr, 0, true, error)) {
         return false;
     }
+    g_current_widget = "bar_ui_relative";
+    if (!call_registry(state, "bar_ui_relative", "Initialize", nullptr, 0, true, error)) {
+        return false;
+    }
     g_current_widget = "bar_ui_minimap";
     g_minimap_draw = true;
     g_minimap_update = true;
     if (!call_registry(state, "bar_ui_minimap", "Initialize", nullptr, 0, true, error)) {
+        return false;
+    }
+    g_current_widget = "bar_ui_volume";
+    g_volume_draw = true;
+    if (!call_registry(state, "bar_ui_volume", "Initialize", nullptr, 0, true, error)) {
+        return false;
+    }
+    g_current_widget = "bar_ui_cursor";
+    g_cursor_update = false;
+    if (!call_registry(state, "bar_ui_cursor", "Initialize", nullptr, 0, true, error)) {
+        return false;
+    }
+    g_current_widget = "bar_ui_screenmode";
+    g_screenmode_draw = true;
+    if (!call_registry(state, "bar_ui_screenmode", "Initialize", nullptr, 0, true, error)) {
         return false;
     }
     g_current_widget.clear();
@@ -1304,6 +1416,10 @@ bool widgets_frame(int frame, std::string& error) {
         // Spring ViewResize(vsx, vsy). gui_fonthandler reads the second arg as vsy and
         // crashes if we call it with no args (interactive/fullscreen resize path).
         const double size[2] = {static_cast<double>(g_next_w), static_cast<double>(g_next_h)};
+        // Update minimap's view size before widgets reassert geometry (special-case uses g_view_h).
+        if (g_terrain != nullptr) {
+            minimap_set_world(g_terrain->world_x, g_terrain->world_z, g_next_w, g_next_h);
+        }
         if (!call_flow_resize(state, g_next_w, g_next_h, error) ||
             !call_registry(state, "bar_ui_font", "ViewResize", size, 2, false, error) ||
             !call_registry(state, "bar_ui_top", "ViewResize", nullptr, 0, true, error)) {
@@ -1319,14 +1435,23 @@ bool widgets_frame(int frame, std::string& error) {
         g_current_widget = "bar_ui_tooltip";
         call_registry(state, "bar_ui_tooltip", "ViewResize", size, 2, false, error);
         error.clear();
+        g_current_widget = "bar_ui_relative";
+        call_registry(state, "bar_ui_relative", "ViewResize", size, 2, false, error);
+        error.clear();
         g_current_widget = "bar_ui_minimap";
         if (!call_registry(state, "bar_ui_minimap", "ViewResize", nullptr, 0, false, error)) {
             return false;
         }
+        g_current_widget = "bar_ui_volume";
+        call_registry(state, "bar_ui_volume", "ViewResize", size, 2, false, error);
+        error.clear();
+        g_current_widget = "bar_ui_cursor";
+        call_registry(state, "bar_ui_cursor", "ViewResize", nullptr, 0, false, error);
+        error.clear();
+        g_current_widget = "bar_ui_screenmode";
+        call_registry(state, "bar_ui_screenmode", "ViewResize", nullptr, 0, false, error);
+        error.clear();
         g_current_widget.clear();
-        if (g_terrain != nullptr) {
-            minimap_set_world(g_terrain->world_x, g_terrain->world_z, g_next_w, g_next_h);
-        }
         g_applied_w = g_next_w;
         g_applied_h = g_next_h;
         std::cout << "widgets view " << g_applied_w << "x" << g_applied_h << "\n";
@@ -1373,6 +1498,21 @@ bool widgets_frame(int frame, std::string& error) {
         if (!call_registry(state, "bar_ui_minimap", "DrawScreen", nullptr, 0, false, error)) {
             return false;
         }
+    }
+    g_current_widget = "bar_ui_volume";
+    if (g_volume_draw) {
+        call_registry(state, "bar_ui_volume", "DrawScreen", nullptr, 0, false, error);
+        error.clear();
+    }
+    g_current_widget = "bar_ui_cursor";
+    if (g_cursor_update) {
+        call_registry(state, "bar_ui_cursor", "Update", &step, 1, false, error);
+        error.clear();
+    }
+    g_current_widget = "bar_ui_screenmode";
+    if (g_screenmode_draw) {
+        call_registry(state, "bar_ui_screenmode", "DrawScreen", nullptr, 0, false, error);
+        error.clear();
     }
     // Drive stock WG.tooltip BEFORE DrawScreen. ShowTooltip must run every frame
     // (one-shot disabled=true after draw) and twice on first create (stock sets value

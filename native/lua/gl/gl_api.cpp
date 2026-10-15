@@ -512,9 +512,8 @@ float lua_num(lua_State* state, int index, float fallback) {
     return static_cast<float>(lua_tonumber(state, index));
 }
 
-// Spring inline colors: \255 r g b (byte 255 + 3 channels). \008 resets to white.
-// Codes may appear mid-string (tooltips); leaving 0xFF in the payload makes
-// CFStringCreateWithBytes(UTF-8) return NULL and crash CoreText.
+// Spring inline colors: \255 r g b (byte 255 + 3 channels). \008 resets.
+// Strip for GetTextWidth / empty checks. Print keeps codes; TerrainRenderer applies runs.
 std::string visible_text(const char* raw, size_t length, float& r, float& gch, float& b, float& a) {
     std::string out;
     out.reserve(length);
@@ -999,8 +998,19 @@ int font_print(lua_State* state) {
     float gch = field_num(state, 1, "tg", 1);
     float b = field_num(state, 1, "tb", 1);
     float a = field_num(state, 1, "ta", 1);
+    // Keep \255RGB / \008 in the payload so raster can tint mid-string runs.
+    // Strip only to decide emptiness and for width; base color stays SetTextColor.
+    float ignore_r = r;
+    float ignore_g = gch;
+    float ignore_b = b;
+    float ignore_a = a;
+    const std::string plain =
+        raw != nullptr ? visible_text(raw, length, ignore_r, ignore_g, ignore_b, ignore_a) : std::string();
+    if (plain.empty()) {
+        return 0;
+    }
     HudText text;
-    text.text = raw != nullptr ? visible_text(raw, length, r, gch, b, a) : std::string();
+    text.text = raw != nullptr ? std::string(raw, length) : std::string();
     text.x = lua_num(state, 3, 0);
     text.y = lua_num(state, 4, 0);
     text.size = lua_num(state, 5, field_num(state, 1, "px", 16));
@@ -1017,9 +1027,6 @@ int font_print(lua_State* state) {
         text.align = 2;
     }
     text.outline = flags.find('o') != std::string::npos;
-    if (text.text.empty()) {
-        return 0;
-    }
     note_text(std::move(text));
     return 0;
 }
