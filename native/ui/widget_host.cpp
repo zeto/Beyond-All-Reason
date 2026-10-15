@@ -1,6 +1,7 @@
 #include "widget_host.h"
 
 #include "gl/gl_api.h"
+#include "selection.h"
 
 extern "C" {
 #include "lauxlib.h"
@@ -24,6 +25,20 @@ int g_applied_h = 0;
 int g_next_w = 0;
 int g_next_h = 0;
 HudList g_hud;
+std::string g_current_widget;
+bool g_select_draw = false;
+bool g_select_update = false;
+std::string g_cmd_colors;
+float g_mouse_x = -1;
+float g_mouse_y = -1;
+bool g_mouse_left = false;
+bool g_mouse_middle = false;
+bool g_mouse_right = false;
+bool g_mod_alt = false;
+bool g_mod_ctrl = false;
+bool g_mod_meta = false;
+bool g_mod_shift = false;
+
 
 int lua_error_handler(lua_State* state) {
     const char* message = lua_tostring(state, 1);
@@ -138,9 +153,12 @@ int ui_spectating(lua_State* state) {
 }
 
 int ui_mouse_state(lua_State* state) {
-    lua_pushnumber(state, -1);
-    lua_pushnumber(state, -1);
-    return 2;
+    lua_pushnumber(state, g_mouse_x);
+    lua_pushnumber(state, g_mouse_y);
+    lua_pushboolean(state, g_mouse_left ? 1 : 0);
+    lua_pushboolean(state, g_mouse_middle ? 1 : 0);
+    lua_pushboolean(state, g_mouse_right ? 1 : 0);
+    return 5;
 }
 
 int ui_game_speed(lua_State* state) {
@@ -379,12 +397,151 @@ bool call_flow_resize(lua_State* state, int width, int height, std::string& erro
     return pcall_keep(state, 2, 0, error);
 }
 
+
+int ui_get_selection_box(lua_State* state) {
+    float x1 = 0;
+    float y1 = 0;
+    float x2 = 0;
+    float y2 = 0;
+    if (!selection_get_box(x1, y1, x2, y2)) {
+        return 0;
+    }
+    lua_pushnumber(state, x1);
+    lua_pushnumber(state, y1);
+    lua_pushnumber(state, x2);
+    lua_pushnumber(state, y2);
+    return 4;
+}
+
+int ui_get_mod_keys(lua_State* state) {
+    lua_pushboolean(state, g_mod_alt ? 1 : 0);
+    lua_pushboolean(state, g_mod_ctrl ? 1 : 0);
+    lua_pushboolean(state, g_mod_meta ? 1 : 0);
+    lua_pushboolean(state, g_mod_shift ? 1 : 0);
+    return 4;
+}
+
+int ui_get_minimap_geometry(lua_State* state) {
+    // Minimap is not hosted yet. Returning minimized keeps the selectionbox off that path.
+    lua_pushnumber(state, 0);
+    lua_pushnumber(state, 0);
+    lua_pushnumber(state, 0);
+    lua_pushnumber(state, 0);
+    lua_pushboolean(state, 1);  // minimized
+    lua_pushboolean(state, 0);
+    return 6;
+}
+
+int ui_get_selected_units(lua_State* state) {
+    const SelectionSnapshot& snap = selection_snapshot();
+    lua_newtable(state);
+    for (size_t i = 0; i < snap.selected.size(); ++i) {
+        lua_pushinteger(state, snap.selected[i]);
+        lua_rawseti(state, -2, static_cast<int>(i) + 1);
+    }
+    return 1;
+}
+
+int ui_get_active_command(lua_State* state) {
+    const SelectionSnapshot& snap = selection_snapshot();
+    if (snap.active_cmd == 0) {
+        return 0;
+    }
+    lua_pushinteger(state, 1);
+    lua_pushinteger(state, snap.active_cmd);
+    lua_pushinteger(state, 0);
+    lua_pushstring(state, snap.active_cmd == 10 ? "Move" : "Command");
+    return 4;
+}
+
+int ui_set_mouse_cursor(lua_State* state) {
+    const char* name = lua_tostring(state, 1);
+    if (name != nullptr) {
+        selection_set_cursor(name);
+    }
+    return 0;
+}
+
+int ui_get_mouse_cursor(lua_State* state) {
+    lua_pushstring(state, selection_snapshot().cursor.c_str());
+    lua_pushnumber(state, 1);
+    return 2;
+}
+
+int ui_load_cmd_colors(lua_State* state) {
+    const char* text = lua_tostring(state, 1);
+    if (text != nullptr) {
+        g_cmd_colors = text;
+    }
+    return 0;
+}
+
+int ui_replace_mouse_cursor(lua_State* state) {
+    (void)state;
+    return 0;
+}
+
+int ui_get_screen_geometry(lua_State* state) {
+    return ui_view_geometry(state);
+}
+
+int ui_set_config_float(lua_State* state) {
+    (void)state;
+    return 0;
+}
+
+int ui_handler_update_callin(lua_State* state) {
+    const char* name = lua_tostring(state, 2);
+    if (name == nullptr) {
+        return 0;
+    }
+    const std::string callin = name;
+    if (g_current_widget == "bar_ui_select") {
+        if (callin == "DrawScreen") {
+            g_select_draw = true;
+        } else if (callin == "Update") {
+            g_select_update = true;
+        }
+    }
+    return 0;
+}
+
+int ui_handler_remove_callin(lua_State* state) {
+    const char* name = lua_tostring(state, 2);
+    if (name == nullptr) {
+        return 0;
+    }
+    const std::string callin = name;
+    if (g_current_widget == "bar_ui_select") {
+        if (callin == "DrawScreen") {
+            g_select_draw = false;
+        } else if (callin == "Update") {
+            g_select_update = false;
+        }
+    }
+    return 0;
+}
+
+bool install_widget_handler(lua_State* state, std::string& error) {
+    lua_newtable(state);
+    lua_pushcfunction(state, ui_handler_update_callin);
+    lua_setfield(state, -2, "UpdateCallIn");
+    lua_pushcfunction(state, ui_handler_remove_callin);
+    lua_setfield(state, -2, "RemoveCallIn");
+    lua_setglobal(state, "widgetHandler");
+    (void)error;
+    return true;
+}
+
 }  // namespace
 
 bool widgets_load(lua_State* state, const WidgetEnv& env, std::string& error) {
     g_loaded = false;
     g_state = nullptr;
     g_hud = HudList{};
+    selection_reset();
+    g_select_draw = false;
+    g_select_update = false;
     g_env = env;
     gl_set_root(env.game_root);
     gl_set_view(env.view_w, env.view_h);
@@ -405,6 +562,7 @@ function string.split(val, delimiter)
   return results
 end
 WG = WG or {}
+LUAUI_DIRNAME = "luaui/"
 )LUA",
                             error)) {
         return false;
@@ -436,7 +594,19 @@ WG = WG or {}
     set_spring(state, "GetWind", ui_wind);
     set_spring(state, "IsGUIHidden", ui_gui_hidden);
     set_spring(state, "SendCommands", ui_noop);
-    set_spring(state, "SetMouseCursor", ui_noop);
+    set_spring(state, "SetMouseCursor", ui_set_mouse_cursor);
+    set_spring(state, "GetMouseCursor", ui_get_mouse_cursor);
+    set_spring(state, "GetSelectionBox", ui_get_selection_box);
+    set_spring(state, "GetModKeyState", ui_get_mod_keys);
+    set_spring(state, "GetMiniMapGeometry", ui_get_minimap_geometry);
+    set_spring(state, "GetSelectedUnits", ui_get_selected_units);
+    set_spring(state, "GetActiveCommand", ui_get_active_command);
+    set_spring(state, "LoadCmdColorsConfig", ui_load_cmd_colors);
+    set_spring(state, "ReplaceMouseCursor", ui_replace_mouse_cursor);
+    set_spring(state, "GetScreenGeometry", ui_get_screen_geometry);
+    set_spring(state, "SetConfigFloat", ui_set_config_float);
+    set_spring(state, "SetConfigInt", ui_noop);
+    set_spring(state, "SetConfigString", ui_noop);
     set_vfs(state, "SubDirs", ui_subdirs);
     set_vfs(state, "DirList", ui_dir_list);
     set_vfs(state, "LoadFile", ui_load_file);
@@ -448,11 +618,17 @@ WG = WG or {}
         return false;
     }
 
+    if (!install_widget_handler(state, error)) {
+        return false;
+    }
+
     const std::string font_path = env.game_root + "/luaui/Widgets/gui_fonthandler.lua";
     const std::string flow_path = env.game_root + "/luaui/Widgets/gui_flowui.lua";
     const std::string top_path = env.game_root + "/luaui/Widgets/gui_top_bar.lua";
+    const std::string select_path = env.game_root + "/luaui/Widgets/gui_selectionbox.lua";
     if (!load_widget(state, font_path, "bar_ui_font", error) || !load_widget(state, flow_path, "bar_ui_flow", error) ||
-        !load_widget(state, top_path, "bar_ui_top", error)) {
+        !load_widget(state, top_path, "bar_ui_top", error) ||
+        !load_widget(state, select_path, "bar_ui_select", error)) {
         return false;
     }
     if (!call_registry(state, "bar_ui_font", "Initialize", nullptr, 0, true, error) ||
@@ -460,6 +636,14 @@ WG = WG or {}
         !call_registry(state, "bar_ui_top", "ViewResize", nullptr, 0, true, error)) {
         return false;
     }
+    g_current_widget = "bar_ui_select";
+    g_select_draw = false;
+    g_select_update = false;
+    // Initialize already calls ViewResize(GetViewGeometry()).
+    if (!call_registry(state, "bar_ui_select", "Initialize", nullptr, 0, true, error)) {
+        return false;
+    }
+    g_current_widget.clear();
 
     g_applied_w = env.view_w;
     g_applied_h = env.view_h;
@@ -477,11 +661,20 @@ bool widgets_frame(int frame, std::string& error) {
     lua_State* state = g_state;
     if (g_next_w > 0 && g_next_h > 0 && (g_next_w != g_applied_w || g_next_h != g_applied_h)) {
         gl_set_view(g_next_w, g_next_h);
+        selection_set_view(g_next_w, g_next_h);
         if (!call_flow_resize(state, g_next_w, g_next_h, error) ||
             !call_registry(state, "bar_ui_font", "ViewResize", nullptr, 0, false, error) ||
             !call_registry(state, "bar_ui_top", "ViewResize", nullptr, 0, true, error)) {
             return false;
         }
+        g_current_widget = "bar_ui_select";
+        {
+            const double size[2] = {static_cast<double>(g_next_w), static_cast<double>(g_next_h)};
+            if (!call_registry(state, "bar_ui_select", "ViewResize", size, 2, false, error)) {
+                return false;
+            }
+        }
+        g_current_widget.clear();
         g_applied_w = g_next_w;
         g_applied_h = g_next_h;
     }
@@ -493,7 +686,20 @@ bool widgets_frame(int frame, std::string& error) {
         !call_registry(state, "bar_ui_top", "DrawScreen", nullptr, 0, true, error)) {
         return false;
     }
+    g_current_widget = "bar_ui_select";
+    if (g_select_update) {
+        if (!call_registry(state, "bar_ui_select", "Update", &step, 1, true, error)) {
+            return false;
+        }
+    }
+    if (g_select_draw) {
+        if (!call_registry(state, "bar_ui_select", "DrawScreen", nullptr, 0, true, error)) {
+            return false;
+        }
+    }
+    g_current_widget.clear();
     g_hud = gl_publish();
+    selection_append_highlights(g_hud);
     return true;
 }
 
@@ -502,6 +708,31 @@ void widgets_set_view(int width, int height) {
         g_next_w = width;
         g_next_h = height;
     }
+}
+
+void widgets_set_pointer(float x, float y, bool left, bool middle, bool right, bool alt, bool ctrl, bool meta,
+                         bool shift) {
+    g_mouse_x = x;
+    g_mouse_y = y;
+    g_mouse_left = left;
+    g_mouse_middle = middle;
+    g_mouse_right = right;
+    g_mod_alt = alt;
+    g_mod_ctrl = ctrl;
+    g_mod_meta = meta;
+    g_mod_shift = shift;
+    selection_set_mouse(x, y, left, middle, right, alt, ctrl, meta, shift);
+}
+
+bool widgets_mouse_press(float x, float y, int button, std::string& error) {
+    if (!g_loaded || g_state == nullptr) {
+        return true;
+    }
+    g_current_widget = "bar_ui_select";
+    const double args[3] = {x, y, static_cast<double>(button)};
+    const bool ok = call_registry(g_state, "bar_ui_select", "MousePress", args, 3, false, error);
+    g_current_widget.clear();
+    return ok;
 }
 
 const HudList* hud_list() {

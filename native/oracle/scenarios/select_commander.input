@@ -1,0 +1,5 @@
+# Scripted selection and order-cursor self-check.
+# Frame numbers match the shell presented counter (lock-camera boot).
+# Box covers the commander near the frame center on a 1280x720 lock shot.
+5 box 400 200 900 520
+30 move 8000 4900

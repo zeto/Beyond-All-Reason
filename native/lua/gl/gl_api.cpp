@@ -18,6 +18,9 @@ namespace {
 
 constexpr int kModelview = 0x1700;
 constexpr int kTexture = 0x1702;
+constexpr int kFill = 0x1B02;
+constexpr int kLine = 0x1B01;
+constexpr int kFrontAndBack = 0x0408;
 constexpr float kPi = 3.14159265f;
 
 struct Mat {
@@ -101,6 +104,9 @@ struct Recorder {
     float cg = 1;
     float cb = 1;
     float ca = 1;
+    int polygon_mode = 0x1B02;  // GL_FILL
+    float line_width = 1;
+    bool line_stipple = false;
     int bind = 0;
     int recording = 0;
     int next_list = 1;
@@ -281,6 +287,19 @@ void color_rect(float x1, float y1, float x2, float y2, float r, float gch, floa
     }
     push_quad(corners[0], corners[1], corners[2], corners[3]);
 }
+
+void outline_rect(float x1, float y1, float x2, float y2, float r, float gch, float b, float a, float width) {
+    const float left = std::min(x1, x2);
+    const float right = std::max(x1, x2);
+    const float bottom = std::min(y1, y2);
+    const float top = std::max(y1, y2);
+    const float t = std::max(1.f, width);
+    color_rect(left, bottom, right, bottom + t, r, gch, b, a);
+    color_rect(left, top - t, right, top, r, gch, b, a);
+    color_rect(left, bottom, left + t, top, r, gch, b, a);
+    color_rect(right - t, bottom, right, top, r, gch, b, a);
+}
+
 
 void apply_translate(float x, float y, float z) {
     Mat t = identity_mat();
@@ -952,6 +971,42 @@ int font_print(lua_State* state) {
     return 0;
 }
 
+
+int gl_rect(lua_State* state) {
+    const float x1 = lua_num(state, 1, 0);
+    const float y1 = lua_num(state, 2, 0);
+    const float x2 = lua_num(state, 3, 0);
+    const float y2 = lua_num(state, 4, 0);
+    if (g.polygon_mode == kLine) {
+        outline_rect(x1, y1, x2, y2, g.cr, g.cg, g.cb, g.ca, g.line_width);
+    } else {
+        color_rect(x1, y1, x2, y2, g.cr, g.cg, g.cb, g.ca);
+    }
+    return 0;
+}
+
+int gl_polygon_mode(lua_State* state) {
+    (void)lua_num(state, 1, static_cast<float>(kFrontAndBack));
+    g.polygon_mode = static_cast<int>(lua_num(state, 2, static_cast<float>(kFill)));
+    return 0;
+}
+
+int gl_line_width(lua_State* state) {
+    g.line_width = lua_num(state, 1, 1);
+    return 0;
+}
+
+int gl_line_stipple(lua_State* state) {
+    if (lua_isboolean(state, 1) != 0) {
+        g.line_stipple = lua_toboolean(state, 1) != 0;
+    } else if (lua_isnoneornil(state, 1)) {
+        g.line_stipple = false;
+    } else {
+        g.line_stipple = true;
+    }
+    return 0;
+}
+
 void set_gl(lua_State* state, const char* name, lua_CFunction fn) {
     lua_pushcfunction(state, fn);
     lua_setfield(state, -2, name);
@@ -981,6 +1036,10 @@ void gl_install(lua_State* state) {
     set_gl(state, "Color", gl_color);
     set_gl(state, "Texture", gl_texture);
     set_gl(state, "TexRect", gl_texrect);
+    set_gl(state, "Rect", gl_rect);
+    set_gl(state, "PolygonMode", gl_polygon_mode);
+    set_gl(state, "LineWidth", gl_line_width);
+    set_gl(state, "LineStipple", gl_line_stipple);
     set_gl(state, "Vertex", gl_vertex);
     set_gl(state, "TexCoord", gl_texcoord);
     set_gl(state, "BeginEnd", gl_begin_end);
@@ -1028,6 +1087,12 @@ void gl_install(lua_State* state) {
     lua_setfield(state, -2, "MODELVIEW");
     lua_pushinteger(state, kTexture);
     lua_setfield(state, -2, "TEXTURE");
+    lua_pushinteger(state, kLine);
+    lua_setfield(state, -2, "LINE");
+    lua_pushinteger(state, kFill);
+    lua_setfield(state, -2, "FILL");
+    lua_pushinteger(state, kFrontAndBack);
+    lua_setfield(state, -2, "FRONT_AND_BACK");
     lua_setglobal(state, "GL");
 }
 
@@ -1053,6 +1118,9 @@ int gl_view_height() {
 }
 
 void gl_begin_draw() {
+    g.polygon_mode = kFill;
+    g.line_width = 1.f;
+    g.line_stipple = false;
     g.model = identity_mat();
     g.texture = identity_mat();
     g.model_stack.clear();

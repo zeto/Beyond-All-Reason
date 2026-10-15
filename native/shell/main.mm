@@ -22,6 +22,7 @@
 #include "game_name.h"
 #include "gadget_host.h"
 #include "widget_host.h"
+#include "selection.h"
 #include "move/unit_sim.h"
 #include "smf.h"
 #include "unit_spawn.h"
@@ -61,6 +62,7 @@ struct Options {
     std::string bookmarks;
     std::string trace;
     std::string orders;
+    std::string input;
     std::string pieces;
     bool lock_camera = false;
     int frames = 0;
@@ -70,7 +72,7 @@ void usage() {
     std::cerr << "bar-metal [--gamedata DIR] [--frames N] [--screenshot FILE.ppm]\n"
               << "          [--startscript FILE] [--mapdir DIR]\n"
               << "          [--bookmarks FILE] [--screenshot-dir DIR] [--trace FILE]\n"
-              << "          [--orders FILE] [--pieces FILE] [--lock-camera]\n";
+              << "          [--orders FILE] [--input FILE] [--pieces FILE] [--lock-camera]\n";
 }
 
 bool parse_args(int argc, char** argv, Options& options) {
@@ -137,6 +139,12 @@ bool parse_args(int argc, char** argv, Options& options) {
                 return false;
             }
             options.orders = value;
+        } else if (arg == "--input") {
+            const char* value = need("--input");
+            if (value == nullptr) {
+                return false;
+            }
+            options.input = value;
         } else if (arg == "--pieces") {
             const char* value = need("--pieces");
             if (value == nullptr) {
@@ -189,12 +197,17 @@ struct FrameInput {
     bool order_click = false;
     float order_x = 0;
     float order_y = 0;
+    bool left_down = false;
+    bool left_up = false;
+    float left_x = 0;
+    float left_y = 0;
 };
 
 FrameInput collect_input(NSWindow* window, NSView* view) {
     FrameInput input;
     static bool right_down = false;
     static NSPoint right_at = NSZeroPoint;
+    static bool left_down = false;
     NSPoint screen = [NSEvent mouseLocation];
     NSPoint local = [view convertPoint:[window convertPointFromScreen:screen] fromView:nil];
     input.mouse_x = static_cast<float>(local.x);
@@ -204,7 +217,19 @@ FrameInput collect_input(NSWindow* window, NSView* view) {
                                        untilDate:[NSDate date]
                                           inMode:NSDefaultRunLoopMode
                                          dequeue:YES])) {
-        if (event.type == NSEventTypeScrollWheel) {
+        if (event.type == NSEventTypeLeftMouseDown) {
+            left_down = true;
+            const NSPoint at = [view convertPoint:event.locationInWindow fromView:nil];
+            input.left_down = true;
+            input.left_x = static_cast<float>(at.x);
+            input.left_y = static_cast<float>(view.bounds.size.height - at.y);
+        } else if (event.type == NSEventTypeLeftMouseUp && left_down) {
+            left_down = false;
+            const NSPoint at = [view convertPoint:event.locationInWindow fromView:nil];
+            input.left_up = true;
+            input.left_x = static_cast<float>(at.x);
+            input.left_y = static_cast<float>(view.bounds.size.height - at.y);
+        } else if (event.type == NSEventTypeScrollWheel) {
             float wheel = static_cast<float>(event.scrollingDeltaY);
             if (event.hasPreciseScrollingDeltas) {
                 wheel *= 0.02f;
@@ -648,10 +673,16 @@ int run_terrain(const Options& options, const std::string& game_name) {
     };
     upload_pieces();
     std::vector<bar::ScriptOrder> orders;
+    std::vector<bar::SelectEvent> select_events;
     if (!options.orders.empty() && !bar::load_orders(options.orders, orders, error)) {
         std::cerr << "orders: " << error << "\n";
         return 1;
     }
+    if (!options.input.empty() && !bar::load_select_events(options.input, select_events, error)) {
+        std::cerr << "input: " << error << "\n";
+        return 1;
+    }
+    bar::selection_reset();
     auto place_model = [&](float distance) {
         if (sim.x.empty()) {
             renderer.set_marker(0);
@@ -998,25 +1029,88 @@ int run_terrain(const Options& options, const std::string& game_name) {
             camera.view_width = static_cast<int>(layer.drawableSize.width);
             camera.view_height = static_cast<int>(layer.drawableSize.height);
             const bar::CameraPose pose = bar::camera_pose(camera);
-            if (!scripted && pointer.order_click && !sim.x.empty()) {
-                float origin[3] = {};
-                float direction[3] = {};
-                // Mouse points are in the view. The ray uses the drawable, which is points times the scale.
+            {
                 const float pixel_scale = static_cast<float>(scale);
-                bar::camera_pointer_ray(camera, pose, pointer.order_x * pixel_scale, pointer.order_y * pixel_scale,
-                                        origin, direction);
-                float goal_x = 0;
-                float goal_z = 0;
-                if (bar::terrain_raycast(mesh, origin, direction, goal_x, goal_z) &&
-                    bar::sim_order_move(sim, 0, goal_x, goal_z, mesh, error)) {
-                    std::cout << "order move " << goal_x << " " << goal_z << " waypoints " << sim.path_x[0].size()
-                              << "\n";
-                } else if (!error.empty()) {
-                    std::cerr << "order: " << error << "\n";
-                    error.clear();
+                const float view_h = static_cast<float>(view.bounds.size.height);
+                // Spring / selection y grows up from the bottom. collect_input stores top-down y.
+                const float spring_x = pointer.mouse_x * pixel_scale;
+                const float spring_y = (view_h - pointer.mouse_y) * pixel_scale;
+                const bool left = (buttons & (1u << 0)) != 0;
+                const bool right = (buttons & (1u << 1)) != 0;
+                const bool middle = (buttons & (1u << 2)) != 0;
+                bar::widgets_set_pointer(spring_x, spring_y, left, middle, right, false, false, false, false);
+                bar::selection_set_view(static_cast<int>(layer.drawableSize.width),
+                                        static_cast<int>(layer.drawableSize.height));
+
+                std::vector<bar::SelectionMark> marks;
+                for (size_t i = 0; i < sim.x.size(); ++i) {
+                    if (i < sim.alive.size() && sim.alive[i] == 0) {
+                        continue;
+                    }
+                    float sx = 0;
+                    float sy = 0;
+                    if (!bar::world_to_screen(camera, pose, sim.x[i], sim.y[i], sim.z[i], sx, sy)) {
+                        continue;
+                    }
+                    bar::SelectionMark mark;
+                    mark.unit_id = sim.id[i];
+                    mark.sim_index = static_cast<int>(i);
+                    mark.screen_x = sx;
+                    mark.screen_y = sy;
+                    mark.radius = 36.f * pixel_scale;
+                    marks.push_back(mark);
+                }
+                bar::selection_set_marks(marks);
+
+                if (!scripted) {
+                    if (pointer.left_down) {
+                        const float lx = pointer.left_x * pixel_scale;
+                        const float ly = (view_h - pointer.left_y) * pixel_scale;
+                        bar::selection_left_down(lx, ly);
+                        if (!bar::widgets_mouse_press(lx, ly, 1, error)) {
+                            std::cerr << "select: " << error << "\n";
+                            error.clear();
+                        }
+                    }
+                    if (left && bar::selection_snapshot().boxing) {
+                        bar::selection_left_drag(spring_x, spring_y);
+                    }
+                    if (pointer.left_up) {
+                        const float lx = pointer.left_x * pixel_scale;
+                        const float ly = (view_h - pointer.left_y) * pixel_scale;
+                        bar::selection_left_up(lx, ly);
+                        const bar::SelectionSnapshot& snap = bar::selection_snapshot();
+                        std::cout << "select ids";
+                        for (int id : snap.selected) {
+                            std::cout << " " << id;
+                        }
+                        std::cout << " cursor " << snap.cursor << "\n";
+                    }
+                }
+
+                if (!scripted && pointer.order_click && !sim.x.empty()) {
+                    float origin[3] = {};
+                    float direction[3] = {};
+                    // Mouse points are in the view. The ray uses the drawable, which is points times the scale.
+                    bar::camera_pointer_ray(camera, pose, pointer.order_x * pixel_scale, pointer.order_y * pixel_scale,
+                                            origin, direction);
+                    float goal_x = 0;
+                    float goal_z = 0;
+                    if (bar::terrain_raycast(mesh, origin, direction, goal_x, goal_z)) {
+                        if (!bar::selection_issue_move(sim, goal_x, goal_z, mesh, error)) {
+                            if (error != "no selection") {
+                                std::cerr << "order: " << error << "\n";
+                            }
+                            error.clear();
+                        }
+                    }
                 }
             }
             if (scripted) {
+                if (!bar::apply_select_events(sim, select_events, presented, mesh, error)) {
+                    std::cerr << "input: " << error << "\n";
+                    return 1;
+                }
                 if (!bar::apply_orders(sim, orders, presented, mesh, error)) {
                     // A ship onto land, or a hover onto a cliff, has no legal cell. The unit stays put.
                     if (error == "no ground path") {
@@ -1363,6 +1457,30 @@ int run_terrain(const Options& options, const std::string& game_name) {
         if (!ai_path.empty()) {
             std::cout << "simpleai: " << ai_path.string() << "\n";
         }
+    }
+    if (!options.input.empty()) {
+        const std::filesystem::path report_path =
+            options.trace.empty() ? std::filesystem::path("native/oracle/out/m7select/select.json")
+                                  : std::filesystem::path(options.trace).parent_path() / "select.json";
+        std::error_code mkdir_error;
+        if (report_path.has_parent_path()) {
+            std::filesystem::create_directories(report_path.parent_path(), mkdir_error);
+        }
+        if (mkdir_error) {
+            std::cerr << "select: " << mkdir_error.message() << "\n";
+            return 1;
+        }
+        if (!bar::write_selection_report(report_path.string(), presented, error)) {
+            std::cerr << "select: " << error << "\n";
+            return 1;
+        }
+        std::cout << "select: " << report_path.string() << "\n";
+        const bar::SelectionSnapshot& snap = bar::selection_snapshot();
+        std::cout << "select final ids";
+        for (int id : snap.selected) {
+            std::cout << " " << id;
+        }
+        std::cout << " cursor " << snap.cursor << " cmd " << snap.active_cmd << "\n";
     }
     std::cout << "presented " << presented << "\n";
     if (scripted && !sim.x.empty()) {

@@ -50,4 +50,8 @@ CameraPose camera_pose(const Camera& camera);
 // and a middle-drag to the right grabs the ground toward the east.
 bool camera_frame_ok(std::string& error);
 
+// Returns false when the point is behind the camera. Screen y grows up from the bottom.
+bool world_to_screen(const Camera& camera, const CameraPose& pose, float x, float y, float z, float& screen_x,
+                     float& screen_y);
+
 }  // namespace bar

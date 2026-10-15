@@ -188,6 +188,21 @@ bool project(const float* view_proj, float x, float y, float z, float& ndc_x, fl
 
 }  // namespace
 
+
+bool world_to_screen(const Camera& camera, const CameraPose& pose, float x, float y, float z, float& screen_x,
+                     float& screen_y) {
+    float ndc_x = 0;
+    float ndc_y = 0;
+    if (!project(pose.view_proj, x, y, z, ndc_x, ndc_y)) {
+        return false;
+    }
+    const float w = camera.view_width > 0 ? static_cast<float>(camera.view_width) : 1.f;
+    const float h = camera.view_height > 0 ? static_cast<float>(camera.view_height) : 1.f;
+    screen_x = (ndc_x * 0.5f + 0.5f) * w;
+    screen_y = (ndc_y * 0.5f + 0.5f) * h;
+    return true;
+}
+
 bool camera_frame_ok(std::string& error) {
     Camera camera;
     camera.target_x = 0;
