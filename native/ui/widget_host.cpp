@@ -2,6 +2,8 @@
 
 #include "gl/gl_api.h"
 #include "selection.h"
+#include "build_cmd.h"
+#include "gadget_host.h"
 
 extern "C" {
 #include "lauxlib.h"
@@ -12,6 +14,7 @@ extern "C" {
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <iostream>
 #include <vector>
 
 namespace bar {
@@ -38,6 +41,12 @@ bool g_mod_alt = false;
 bool g_mod_ctrl = false;
 bool g_mod_meta = false;
 bool g_mod_shift = false;
+UnitSim* g_sim = nullptr;
+const TerrainMesh* g_terrain = nullptr;
+float g_view_proj[16] = {};
+bool g_have_view_proj = false;
+bool g_grid_draw = true;
+bool g_grid_update = true;
 
 
 int lua_error_handler(lua_State* state) {
@@ -502,6 +511,12 @@ int ui_handler_update_callin(lua_State* state) {
         } else if (callin == "Update") {
             g_select_update = true;
         }
+    } else if (g_current_widget == "bar_ui_grid") {
+        if (callin == "DrawScreen") {
+            g_grid_draw = true;
+        } else if (callin == "Update") {
+            g_grid_update = true;
+        }
     }
     return 0;
 }
@@ -518,7 +533,264 @@ int ui_handler_remove_callin(lua_State* state) {
         } else if (callin == "Update") {
             g_select_update = false;
         }
+    } else if (g_current_widget == "bar_ui_grid") {
+        if (callin == "DrawScreen") {
+            g_grid_draw = false;
+        } else if (callin == "Update") {
+            g_grid_update = false;
+        }
     }
+    return 0;
+}
+
+
+int ui_get_game_frame(lua_State* state) {
+    lua_pushinteger(state, 1);
+    return 1;
+}
+
+int ui_get_game_seconds(lua_State* state) {
+    lua_pushnumber(state, 1);
+    return 1;
+}
+
+int ui_get_selected_units_sorted(lua_State* state) {
+    const SelectionSnapshot& snap = selection_snapshot();
+    lua_newtable(state);
+    if (g_sim == nullptr || snap.selected.empty()) {
+        return 1;
+    }
+    // Map defID -> array of unit ids. Look up def from sim.
+    for (int unit_id : snap.selected) {
+        int def_id = 0;
+        for (size_t i = 0; i < g_sim->id.size(); ++i) {
+            if (g_sim->id[i] != unit_id) {
+                continue;
+            }
+            def_id = player_unitdef_id(g_sim->def_name[i]);
+            break;
+        }
+        if (def_id == 0) {
+            def_id = 1;
+        }
+        lua_rawgeti(state, -1, def_id);
+        if (!lua_istable(state, -1)) {
+            lua_pop(state, 1);
+            lua_newtable(state);
+            lua_pushvalue(state, -1);
+            lua_rawseti(state, -3, def_id);
+        }
+        const int n = static_cast<int>(lua_objlen(state, -1));
+        lua_pushinteger(state, unit_id);
+        lua_rawseti(state, -2, n + 1);
+        lua_pop(state, 1);
+    }
+    // n = count of distinct def keys
+    int n = 0;
+    lua_pushnil(state);
+    while (lua_next(state, -2) != 0) {
+        ++n;
+        lua_pop(state, 1);
+    }
+    lua_pushinteger(state, n);
+    lua_setfield(state, -2, "n");
+    return 1;
+}
+
+int ui_get_unit_cmd_descs(lua_State* state) {
+    const int unit = static_cast<int>(luaL_checknumber(state, 1));
+    if (g_sim == nullptr) {
+        return 0;
+    }
+    // Prefer nil so gridmenu uses UnitDefs.buildOptions (already annotated).
+    (void)unit;
+    return 0;
+}
+
+int ui_get_unit_def_id(lua_State* state) {
+    const int unit = static_cast<int>(luaL_checknumber(state, 1));
+    if (g_sim == nullptr) {
+        return 0;
+    }
+    for (size_t i = 0; i < g_sim->id.size(); ++i) {
+        if (g_sim->id[i] == unit) {
+            const int id = player_unitdef_id(g_sim->def_name[i]);
+            if (id != 0) {
+                lua_pushinteger(state, id);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+int ui_get_unit_is_being_built(lua_State* state) {
+    lua_pushboolean(state, 0);
+    return 1;
+}
+
+int ui_set_active_command(lua_State* state) {
+    // Forms: SetActiveCommand(0) | SetActiveCommand(cmd) | SetActiveCommand(idx, button, left, right, ...)
+    if (lua_isnoneornil(state, 1) || (lua_isnumber(state, 1) && lua_tonumber(state, 1) == 0)) {
+        build_clear_active_command();
+        lua_pushboolean(state, 1);
+        return 1;
+    }
+    const int cmd = static_cast<int>(lua_tonumber(state, 1));
+    const SelectionSnapshot& snap = selection_snapshot();
+    const int selected = snap.selected.empty() ? 0 : snap.selected.front();
+    std::string error;
+    if (cmd < 0) {
+        // Negative unitDefID. Resolve name from UnitDefs.
+        lua_getglobal(state, "UnitDefs");
+        lua_rawgeti(state, -1, -cmd);
+        std::string name;
+        if (lua_istable(state, -1)) {
+            lua_getfield(state, -1, "name");
+            if (lua_isstring(state, -1)) {
+                name = lua_tostring(state, -1);
+            }
+            lua_pop(state, 1);
+        }
+        lua_pop(state, 2);
+        if (name.empty() || !build_set_by_def(name, -cmd, g_sim, error)) {
+            lua_pushboolean(state, 0);
+            return 1;
+        }
+        lua_pushboolean(state, 1);
+        return 1;
+    }
+    if (!build_set_active_command(cmd, g_sim, selected, error)) {
+        lua_pushboolean(state, 0);
+        return 1;
+    }
+    lua_pushboolean(state, 1);
+    return 1;
+}
+
+int ui_get_active_command_build(lua_State* state) {
+    const BuildCmdState& build = build_cmd_state();
+    if (build.placing && build.active_cmd != 0) {
+        lua_pushinteger(state, build.active_index > 0 ? build.active_index : 1);
+        lua_pushinteger(state, build.active_cmd);
+        lua_pushinteger(state, 0);
+        lua_pushstring(state, build.active_name.c_str());
+        return 4;
+    }
+    // Fall back to selection move command.
+    return ui_get_active_command(state);
+}
+
+int ui_get_cmd_desc_index(lua_State* state) {
+    const int cmd = static_cast<int>(luaL_checknumber(state, 1));
+    const int index = build_cmd_desc_index(cmd);
+    if (index == 0 && cmd < 0) {
+        // Build options: pretend index exists so pickBlueprint can SetActiveCommand(cmd)
+        lua_pushinteger(state, 1);
+        return 1;
+    }
+    if (index == 0) {
+        return 0;
+    }
+    lua_pushinteger(state, index);
+    return 1;
+}
+
+int ui_get_action_hotkeys(lua_State* state) {
+    lua_newtable(state);
+    return 1;
+}
+
+int ui_play_sound(lua_State* state) {
+    (void)state;
+    return 0;
+}
+
+int ui_give_order(lua_State* state) {
+    // Mirror gadget GiveOrderToUnit for build placements from the UI state.
+    const int unit = static_cast<int>(luaL_checknumber(state, 1));
+    const int cmd = static_cast<int>(luaL_checknumber(state, 2));
+    if (cmd < 0) {
+        float x = 0;
+        float z = 0;
+        if (lua_istable(state, 3)) {
+            lua_rawgeti(state, 3, 1);
+            x = static_cast<float>(lua_tonumber(state, -1));
+            lua_pop(state, 1);
+            lua_rawgeti(state, 3, 3);
+            z = static_cast<float>(lua_tonumber(state, -1));
+            lua_pop(state, 1);
+        }
+        lua_getglobal(state, "UnitDefs");
+        lua_rawgeti(state, -1, -cmd);
+        std::string name;
+        if (lua_istable(state, -1)) {
+            lua_getfield(state, -1, "name");
+            if (lua_isstring(state, -1)) {
+                name = lua_tostring(state, -1);
+            }
+            lua_pop(state, 1);
+        }
+        lua_pop(state, 2);
+        std::string error;
+        if (!name.empty()) {
+            player_issue_build(unit, name, x, z, error);
+        }
+    }
+    return 0;
+}
+
+int ui_echo(lua_State* state) {
+    const int top = lua_gettop(state);
+    for (int i = 1; i <= top; ++i) {
+        const char* text = lua_tostring(state, i);
+        std::cout << (text != nullptr ? text : "(nil)") << (i == top ? "\n" : " ");
+    }
+    return 0;
+}
+
+
+
+
+int ui_false(lua_State* state) {
+    lua_pushboolean(state, 0);
+    return 1;
+}
+
+int ui_unit_is_building(lua_State* state) {
+    (void)state;
+    return 0;  // nil: not currently building
+}
+
+int ui_team_rules_params(lua_State* state) {
+    (void)state;
+    lua_newtable(state);
+    return 1;
+}
+
+int ui_team_rules_param(lua_State* state) {
+    (void)state;
+    return 0;
+}
+
+int ui_handler_known(lua_State* state) {
+    (void)state;
+    lua_pushboolean(state, 0);
+    return 1;
+}
+
+int ui_handler_disable(lua_State* state) {
+    (void)state;
+    return 0;
+}
+
+int ui_handler_register_cmd(lua_State* state) {
+    (void)state;
+    return 0;
+}
+
+int ui_handler_action_add(lua_State* state) {
+    (void)state;
     return 0;
 }
 
@@ -528,6 +800,16 @@ bool install_widget_handler(lua_State* state, std::string& error) {
     lua_setfield(state, -2, "UpdateCallIn");
     lua_pushcfunction(state, ui_handler_remove_callin);
     lua_setfield(state, -2, "RemoveCallIn");
+    lua_pushcfunction(state, ui_handler_known);
+    lua_setfield(state, -2, "IsWidgetKnown");
+    lua_pushcfunction(state, ui_handler_disable);
+    lua_setfield(state, -2, "DisableWidgetRaw");
+    lua_pushcfunction(state, ui_handler_register_cmd);
+    lua_setfield(state, -2, "RegisterUnitCommand");
+    lua_newtable(state);
+    lua_pushcfunction(state, ui_handler_action_add);
+    lua_setfield(state, -2, "AddAction");
+    lua_setfield(state, -2, "actionHandler");
     lua_setglobal(state, "widgetHandler");
     (void)error;
     return true;
@@ -548,6 +830,34 @@ bool widgets_load(lua_State* state, const WidgetEnv& env, std::string& error) {
     gl_install(state);
 
     if (!run_chunk(state, R"LUA(
+function math.round(value)
+  if value >= 0 then return math.floor(value + 0.5) end
+  return math.ceil(value - 0.5)
+end
+tracy = tracy or {
+  ZoneBeginN = function() end,
+  ZoneBegin = function() end,
+  ZoneEnd = function() end,
+  Message = function() end,
+  ZoneName = function() end,
+  ZoneText = function() end,
+}
+function pairsByKeys(tbl, keySortFunction)
+  local keys = {}
+  for k in pairs(tbl) do keys[#keys + 1] = k end
+  table.sort(keys, keySortFunction)
+  local i = 0
+  return function()
+    i = i + 1
+    local k = keys[i]
+    if k ~= nil then return k, tbl[k] end
+  end
+end
+function math.clamp(value, low, high)
+  if value < low then return low end
+  if value > high then return high end
+  return value
+end
 function math.isInRect(x, y, x1, y1, x2, y2)
   return x >= x1 and y >= y1 and x <= x2 and y <= y2
 end
@@ -563,6 +873,25 @@ function string.split(val, delimiter)
 end
 WG = WG or {}
 LUAUI_DIRNAME = "luaui/"
+CMD.OPT_ALT = 4
+CMD.OPT_CTRL = 64
+CMD.OPT_META = 128
+CMD.OPT_SHIFT = 32
+CMD.OPT_RIGHT = 16
+CMD.BUILD = -1
+CMD.INSERT = 1
+GameCMD = GameCMD or { STOP_PRODUCTION = 37215 }
+local _include = include or VFS.Include
+function include(path)
+  local tries = { "luaui/Headers/" .. path, "luaui/" .. path, path, "common/" .. path }
+  for _, p in ipairs(tries) do
+    local ok, result = pcall(_include, p)
+    if ok then return result end
+  end
+  error("include failed: " .. tostring(path))
+end
+os = os or {}
+os.clock = os.clock or function() return 0 end
 )LUA",
                             error)) {
         return false;
@@ -600,13 +929,31 @@ LUAUI_DIRNAME = "luaui/"
     set_spring(state, "GetModKeyState", ui_get_mod_keys);
     set_spring(state, "GetMiniMapGeometry", ui_get_minimap_geometry);
     set_spring(state, "GetSelectedUnits", ui_get_selected_units);
-    set_spring(state, "GetActiveCommand", ui_get_active_command);
+    set_spring(state, "GetActiveCommand", ui_get_active_command_build);
     set_spring(state, "LoadCmdColorsConfig", ui_load_cmd_colors);
     set_spring(state, "ReplaceMouseCursor", ui_replace_mouse_cursor);
     set_spring(state, "GetScreenGeometry", ui_get_screen_geometry);
     set_spring(state, "SetConfigFloat", ui_set_config_float);
     set_spring(state, "SetConfigInt", ui_noop);
     set_spring(state, "SetConfigString", ui_noop);
+    set_spring(state, "GetGameFrame", ui_get_game_frame);
+    set_spring(state, "GetGameSeconds", ui_get_game_seconds);
+    set_spring(state, "GetSelectedUnitsSorted", ui_get_selected_units_sorted);
+    set_spring(state, "GetUnitCmdDescs", ui_get_unit_cmd_descs);
+    set_spring(state, "GetUnitDefID", ui_get_unit_def_id);
+    set_spring(state, "GetUnitIsBeingBuilt", ui_get_unit_is_being_built);
+    set_spring(state, "SetActiveCommand", ui_set_active_command);
+    set_spring(state, "GetCmdDescIndex", ui_get_cmd_desc_index);
+    set_spring(state, "GetActionHotKeys", ui_get_action_hotkeys);
+    set_spring(state, "PlaySoundFile", ui_play_sound);
+    set_spring(state, "GiveOrderToUnit", ui_give_order);
+    set_spring(state, "Echo", ui_echo);
+    set_spring(state, "GetTeamRulesParams", ui_team_rules_params);
+    set_spring(state, "GetUnitIsBuilding", ui_unit_is_building);
+    set_spring(state, "IsGodModeEnabled", ui_false);
+    set_spring(state, "IsCheatingEnabled", ui_false);
+    set_spring(state, "GetTeamRulesParam", ui_team_rules_param);
+    set_spring(state, "GetActiveCommand", ui_get_active_command_build);
     set_vfs(state, "SubDirs", ui_subdirs);
     set_vfs(state, "DirList", ui_dir_list);
     set_vfs(state, "LoadFile", ui_load_file);
@@ -622,13 +969,46 @@ LUAUI_DIRNAME = "luaui/"
         return false;
     }
 
+    if (!run_chunk(state, R"LUA(
+VFS.Include("common/tablefunctions.lua")
+)LUA",
+                            error)) {
+        return false;
+    }
+
+    if (!run_chunk(state, R"LUA(
+for id, ud in pairs(UnitDefs) do
+  if type(ud) == "table" then
+    if ud.maxWeaponRange == nil then ud.maxWeaponRange = 0 end
+    if ud.metalCost == nil then ud.metalCost = 0 end
+    if ud.energyCost == nil then ud.energyCost = 0 end
+    if ud.buildTime == nil then ud.buildTime = 0 end
+    if ud.buildSpeed == nil then ud.buildSpeed = 0 end
+    if ud.buildOptions == nil then ud.buildOptions = {} end
+    if ud.translatedHumanName == nil then ud.translatedHumanName = ud.name or tostring(id) end
+    if ud.translatedTooltip == nil then ud.translatedTooltip = ud.translatedHumanName end
+    if ud.iconType == nil then ud.iconType = "default" end
+    if ud.customParams == nil then ud.customParams = {} end
+    if ud.isBuilder == nil then ud.isBuilder = false end
+    if ud.isFactory == nil then ud.isFactory = false end
+  end
+end
+)LUA",
+                            error)) {
+        return false;
+    }
+
     const std::string font_path = env.game_root + "/luaui/Widgets/gui_fonthandler.lua";
     const std::string flow_path = env.game_root + "/luaui/Widgets/gui_flowui.lua";
     const std::string top_path = env.game_root + "/luaui/Widgets/gui_top_bar.lua";
     const std::string select_path = env.game_root + "/luaui/Widgets/gui_selectionbox.lua";
+    const std::string grid_path = env.game_root + "/luaui/Widgets/gui_gridmenu.lua";
+    build_cmd_set_root(env.game_root);
+    build_cmd_reset();
     if (!load_widget(state, font_path, "bar_ui_font", error) || !load_widget(state, flow_path, "bar_ui_flow", error) ||
         !load_widget(state, top_path, "bar_ui_top", error) ||
-        !load_widget(state, select_path, "bar_ui_select", error)) {
+        !load_widget(state, select_path, "bar_ui_select", error) ||
+        !load_widget(state, grid_path, "bar_ui_grid", error)) {
         return false;
     }
     if (!call_registry(state, "bar_ui_font", "Initialize", nullptr, 0, true, error) ||
@@ -639,8 +1019,13 @@ LUAUI_DIRNAME = "luaui/"
     g_current_widget = "bar_ui_select";
     g_select_draw = false;
     g_select_update = false;
-    // Initialize already calls ViewResize(GetViewGeometry()).
     if (!call_registry(state, "bar_ui_select", "Initialize", nullptr, 0, true, error)) {
+        return false;
+    }
+    g_current_widget = "bar_ui_grid";
+    g_grid_draw = true;
+    g_grid_update = true;
+    if (!call_registry(state, "bar_ui_grid", "Initialize", nullptr, 0, true, error)) {
         return false;
     }
     g_current_widget.clear();
@@ -697,9 +1082,23 @@ bool widgets_frame(int frame, std::string& error) {
             return false;
         }
     }
+    g_current_widget = "bar_ui_grid";
+    if (g_grid_update) {
+        if (!call_registry(state, "bar_ui_grid", "Update", &step, 1, false, error)) {
+            return false;
+        }
+    }
+    if (g_grid_draw) {
+        if (!call_registry(state, "bar_ui_grid", "DrawScreen", nullptr, 0, false, error)) {
+            return false;
+        }
+    }
     g_current_widget.clear();
     g_hud = gl_publish();
     selection_append_highlights(g_hud);
+    if (g_have_view_proj) {
+        build_append_preview(g_hud, g_view_proj, gl_view_width(), gl_view_height());
+    }
     return true;
 }
 
@@ -708,6 +1107,54 @@ void widgets_set_view(int width, int height) {
         g_next_w = width;
         g_next_h = height;
     }
+}
+
+
+bool widgets_selection_changed(const std::vector<int>& unit_ids, std::string& error) {
+    if (!g_loaded || g_state == nullptr) {
+        return true;
+    }
+    lua_State* state = g_state;
+    g_current_widget = "bar_ui_grid";
+    lua_getfield(state, LUA_REGISTRYINDEX, "bar_ui_grid");
+    if (!lua_istable(state, -1)) {
+        lua_pop(state, 1);
+        g_current_widget.clear();
+        return true;
+    }
+    lua_getfield(state, -1, "SelectionChanged");
+    if (!lua_isfunction(state, -1)) {
+        lua_pop(state, 2);
+        g_current_widget.clear();
+        return true;
+    }
+    lua_pushvalue(state, -2);
+    lua_newtable(state);
+    for (size_t i = 0; i < unit_ids.size(); ++i) {
+        lua_pushinteger(state, unit_ids[i]);
+        lua_rawseti(state, -2, static_cast<int>(i) + 1);
+    }
+    // Drop the registry widget under the function: stack is widget, fn, self, sel.
+    lua_remove(state, -4);
+    const bool ok = pcall_keep(state, 2, 0, error);
+    g_current_widget.clear();
+    return ok;
+}
+
+void widgets_set_sim(UnitSim* sim, const TerrainMesh* terrain) {
+    g_sim = sim;
+    g_terrain = terrain;
+}
+
+void widgets_set_view_proj(const float* view_proj16) {
+    if (view_proj16 == nullptr) {
+        g_have_view_proj = false;
+        return;
+    }
+    for (int i = 0; i < 16; ++i) {
+        g_view_proj[i] = view_proj16[i];
+    }
+    g_have_view_proj = true;
 }
 
 void widgets_set_pointer(float x, float y, bool left, bool middle, bool right, bool alt, bool ctrl, bool meta,

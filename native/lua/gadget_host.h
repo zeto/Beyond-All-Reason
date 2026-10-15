@@ -76,6 +76,12 @@ bool simpleai_drive(const AiEconomy& eco, int frame, std::string& error);
 
 bool write_ai_report(const std::string& path, std::string& error);
 
+// Queue a player build order (negative cmd) onto the live SimpleAI drive path.
+bool player_issue_build(int unit_id, const std::string& def_name, float x, float z, std::string& error);
+
+// Look up a unitDefID by name from the open gadget session. 0 if unknown.
+int player_unitdef_id(const std::string& def_name);
+
 void gadget_session_close();
 
 }  // namespace bar

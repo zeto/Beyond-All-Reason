@@ -939,6 +939,16 @@ int font_width(lua_State* state) {
     return 1;
 }
 
+int font_height(lua_State* state) {
+    (void)state;
+    // Approximate em-height as a fraction of the font's pixel size.
+    const float px = field_num(state, 1, "px", 16);
+    lua_pushnumber(state, 0.8);
+    lua_pushnumber(state, 0.2);
+    (void)px;
+    return 2;
+}
+
 int font_print(lua_State* state) {
     size_t length = 0;
     const char* raw = lua_tolstring(state, 2, &length);
@@ -1029,6 +1039,8 @@ void gl_install(lua_State* state) {
     lua_setfield(state, -2, "SetOutlineColor");
     lua_pushcfunction(state, font_width);
     lua_setfield(state, -2, "GetTextWidth");
+    lua_pushcfunction(state, font_height);
+    lua_setfield(state, -2, "GetTextHeight");
     lua_setfield(state, -2, "__index");
     lua_pop(state, 1);
 

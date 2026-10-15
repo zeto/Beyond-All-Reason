@@ -1449,6 +1449,26 @@ int spring_ensure_unit_def(lua_State* state) {
     lua_setfield(state, -2, "customParams");
     lua_newtable(state);
     lua_setfield(state, -2, "modCategories");
+    lua_newtable(state);
+    lua_setfield(state, -2, "buildOptions");
+    lua_pushboolean(state, 0);
+    lua_setfield(state, -2, "isBuilder");
+    lua_pushnumber(state, 0);
+    lua_setfield(state, -2, "buildSpeed");
+    lua_pushnumber(state, 0);
+    lua_setfield(state, -2, "metalCost");
+    lua_pushnumber(state, 0);
+    lua_setfield(state, -2, "energyCost");
+    lua_pushlstring(state, name.data(), name.size());
+    lua_setfield(state, -2, "translatedHumanName");
+    lua_pushlstring(state, name.data(), name.size());
+    lua_setfield(state, -2, "translatedTooltip");
+    lua_pushstring(state, "default");
+    lua_setfield(state, -2, "iconType");
+    lua_pushnumber(state, 0);
+    lua_setfield(state, -2, "maxWeaponRange");
+    lua_pushnumber(state, 0);
+    lua_setfield(state, -2, "extractsMetal");
     lua_pushvalue(state, -1);
     lua_pushlstring(state, name.data(), name.size());
     lua_insert(state, -2);
@@ -1488,6 +1508,10 @@ math.clamp = function(value, low, high)
   if value < low then return low end
   if value > high then return high end
   return value
+end
+math.round = function(value)
+  if value >= 0 then return math.floor(value + 0.5) end
+  return math.ceil(value - 0.5)
 end
 table.getKeyOf = function(tbl, value)
   for key, item in pairs(tbl) do
@@ -1620,6 +1644,22 @@ bool push_def(lua_State* state, int id, const char* name, float metal_store, flo
     lua_setfield(state, -2, "extractsMetal");
     lua_pushnumber(state, 0);
     lua_setfield(state, -2, "energyMake");
+    lua_pushnumber(state, 0);
+    lua_setfield(state, -2, "buildSpeed");
+    lua_pushnumber(state, 0);
+    lua_setfield(state, -2, "metalCost");
+    lua_pushnumber(state, 0);
+    lua_setfield(state, -2, "energyCost");
+    lua_pushnumber(state, 0);
+    lua_setfield(state, -2, "buildTime");
+    lua_pushnumber(state, 0);
+    lua_setfield(state, -2, "maxWeaponRange");
+    lua_pushstring(state, name);
+    lua_setfield(state, -2, "translatedHumanName");
+    lua_pushstring(state, name);
+    lua_setfield(state, -2, "translatedTooltip");
+    lua_pushstring(state, "default");
+    lua_setfield(state, -2, "iconType");
     lua_pushnumber(state, 0);
     lua_setfield(state, -2, "windGenerator");
     lua_pushnumber(state, 0);
@@ -1909,6 +1949,26 @@ void annotate_roles(lua_State* state, Host& host) {
         }
         lua_setfield(state, -2, "buildOptions");
         set_bool_field(state, "isFactory", role.factory);
+        UnitBuild costs;
+        std::string cost_error;
+        if (load_unit_build(host.game_root, entry.second, costs, cost_error)) {
+            set_num_field(state, "metalCost", costs.metal_cost);
+            set_num_field(state, "energyCost", costs.energy_cost);
+            set_num_field(state, "buildTime", costs.build_time);
+        }
+        UnitBuilder builder;
+        if (load_unit_builder(host.game_root, entry.second, builder, cost_error) && builder.builder) {
+            set_num_field(state, "buildSpeed", builder.worker_time);
+        } else {
+            set_num_field(state, "buildSpeed", 0);
+        }
+        set_num_field(state, "maxWeaponRange", 0);
+        lua_pushstring(state, entry.second.c_str());
+        lua_setfield(state, -2, "translatedHumanName");
+        lua_pushstring(state, entry.second.c_str());
+        lua_setfield(state, -2, "translatedTooltip");
+        lua_pushstring(state, "default");
+        lua_setfield(state, -2, "iconType");
         if (role.has_weapon) {
             lua_newtable(state);
             lua_newtable(state);
@@ -2005,6 +2065,53 @@ void keep_gadget_session(lua_State* state, std::unique_ptr<Host> host) {
 }
 
 }  // namespace
+
+bool player_issue_build(int unit_id, const std::string& def_name, float x, float z, std::string& error) {
+    if (g_session == nullptr || g_session->host == nullptr) {
+        error = "no gadget session";
+        return false;
+    }
+    Host& host = *g_session->host;
+    if (host.sim == nullptr) {
+        error = "no sim";
+        return false;
+    }
+    const auto at = host.def_ids.find(def_name);
+    if (at == host.def_ids.end()) {
+        error = "unknown build def " + def_name;
+        return false;
+    }
+    LiveOrder live;
+    live.unit = unit_id;
+    live.cmd = -at->second;
+    live.def_name = def_name;
+    live.x = x;
+    live.y = 0;
+    live.z = z;
+    host.live.erase(std::remove_if(host.live.begin(), host.live.end(),
+                                    [&](const LiveOrder& row) { return row.unit == unit_id; }),
+                    host.live.end());
+    host.live.push_back(live);
+    AiOrder order;
+    order.unit = unit_id;
+    order.cmd = live.cmd;
+    order.def_name = def_name;
+    order.x = x;
+    order.y = 0;
+    order.z = z;
+    host.ai_orders.push_back(order);
+    std::cout << "player build " << def_name << " unit " << unit_id << " at " << x << " " << z << "\n";
+    return true;
+}
+
+int player_unitdef_id(const std::string& def_name) {
+    if (g_session == nullptr || g_session->host == nullptr) {
+        return 0;
+    }
+    const auto at = g_session->host->def_ids.find(def_name);
+    return at == g_session->host->def_ids.end() ? 0 : at->second;
+}
+
 
 void gadget_session_close() {
     if (g_session == nullptr) {

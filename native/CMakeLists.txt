@@ -73,6 +73,7 @@ add_executable(bar-metal
   lua/gl/gl_api.cpp
   ui/widget_host.cpp
   ui/selection.cpp
+  ui/build_cmd.cpp
 )
 target_include_directories(bar-metal PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/rhi/metal4

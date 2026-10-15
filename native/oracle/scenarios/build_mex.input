@@ -1,0 +1,5 @@
+# M7 build menu self-check: select commander, pick mex, place on a nearby metal spot.
+# Armada start is 7600,4900. Closest open mex often near 7416,4888 (SimpleAI pick).
+5 box 400 200 900 520
+15 pick armmex
+30 place armmex 7416 4888

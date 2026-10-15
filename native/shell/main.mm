@@ -23,6 +23,7 @@
 #include "gadget_host.h"
 #include "widget_host.h"
 #include "selection.h"
+#include "build_cmd.h"
 #include "move/unit_sim.h"
 #include "smf.h"
 #include "unit_spawn.h"
@@ -42,6 +43,8 @@ void objc_autoreleasePoolPop(void* pool);
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <iostream>
 #include <string>
 
@@ -674,15 +677,23 @@ int run_terrain(const Options& options, const std::string& game_name) {
     upload_pieces();
     std::vector<bar::ScriptOrder> orders;
     std::vector<bar::SelectEvent> select_events;
+    std::vector<bar::BuildEvent> build_events;
     if (!options.orders.empty() && !bar::load_orders(options.orders, orders, error)) {
         std::cerr << "orders: " << error << "\n";
         return 1;
     }
-    if (!options.input.empty() && !bar::load_select_events(options.input, select_events, error)) {
-        std::cerr << "input: " << error << "\n";
-        return 1;
+    if (!options.input.empty()) {
+        if (!bar::load_select_events(options.input, select_events, error)) {
+            std::cerr << "input: " << error << "\n";
+            return 1;
+        }
+        if (!bar::load_build_events(options.input, build_events, error)) {
+            std::cerr << "input: " << error << "\n";
+            return 1;
+        }
     }
     bar::selection_reset();
+    bar::build_cmd_reset();
     auto place_model = [&](float distance) {
         if (sim.x.empty()) {
             renderer.set_marker(0);
@@ -1106,8 +1117,22 @@ int run_terrain(const Options& options, const std::string& game_name) {
                     }
                 }
             }
+            bar::widgets_set_sim(&sim, &mesh);
+            bar::widgets_set_view_proj(pose.view_proj);
             if (scripted) {
                 if (!bar::apply_select_events(sim, select_events, presented, mesh, error)) {
+                    std::cerr << "input: " << error << "\n";
+                    return 1;
+                }
+                // Tell the stock grid menu about the current selection.
+                if (!bar::widgets_selection_changed(bar::selection_snapshot().selected, error)) {
+                    std::cerr << "gridmenu: " << error << "\n";
+                    return 1;
+                }
+                const int selected = bar::selection_snapshot().selected.empty()
+                                         ? 0
+                                         : bar::selection_snapshot().selected.front();
+                if (!bar::apply_build_events(sim, build_events, presented, mesh, selected, error)) {
                     std::cerr << "input: " << error << "\n";
                     return 1;
                 }
@@ -1481,6 +1506,14 @@ int run_terrain(const Options& options, const std::string& game_name) {
             std::cout << " " << id;
         }
         std::cout << " cursor " << snap.cursor << " cmd " << snap.active_cmd << "\n";
+        const std::filesystem::path build_path =
+            options.trace.empty() ? std::filesystem::path("native/oracle/out/m7select/build.json")
+                                  : std::filesystem::path(options.trace).parent_path() / "build.json";
+        if (!bar::write_build_report(build_path.string(), presented, error)) {
+            std::cerr << "build: " << error << "\n";
+            return 1;
+        }
+        std::cout << "build: " << build_path.string() << "\n";
     }
     std::cout << "presented " << presented << "\n";
     if (scripted && !sim.x.empty()) {
