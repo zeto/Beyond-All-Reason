@@ -41,6 +41,7 @@ bool g_mod_alt = false;
 bool g_mod_ctrl = false;
 bool g_mod_meta = false;
 bool g_mod_shift = false;
+int g_frame = 0;
 UnitSim* g_sim = nullptr;
 const TerrainMesh* g_terrain = nullptr;
 float g_view_proj[16] = {};
@@ -545,12 +546,12 @@ int ui_handler_remove_callin(lua_State* state) {
 
 
 int ui_get_game_frame(lua_State* state) {
-    lua_pushinteger(state, 1);
+    lua_pushinteger(state, g_frame);
     return 1;
 }
 
 int ui_get_game_seconds(lua_State* state) {
-    lua_pushnumber(state, 1);
+    lua_pushnumber(state, static_cast<double>(g_frame) / 30.0);
     return 1;
 }
 
@@ -625,8 +626,15 @@ int ui_get_unit_def_id(lua_State* state) {
 }
 
 int ui_get_unit_is_being_built(lua_State* state) {
-    lua_pushboolean(state, 0);
-    return 1;
+    const int unit = static_cast<int>(luaL_checknumber(state, 1));
+    float progress = 0;
+    if (!unit_is_being_built(unit, &progress)) {
+        lua_pushboolean(state, 0);
+        return 1;
+    }
+    lua_pushboolean(state, 1);
+    lua_pushnumber(state, progress);
+    return 2;
 }
 
 int ui_set_active_command(lua_State* state) {
@@ -752,25 +760,57 @@ int ui_echo(lua_State* state) {
 
 
 
-int ui_false(lua_State* state) {
+// Single-player bar-metal has no god-mode toggle; always reports false.
+int ui_is_god_mode(lua_State* state) {
+    lua_pushboolean(state, 0);
+    return 1;
+}
+
+// Cheating is not enabled in this client.
+int ui_is_cheating(lua_State* state) {
     lua_pushboolean(state, 0);
     return 1;
 }
 
 int ui_unit_is_building(lua_State* state) {
-    (void)state;
-    return 0;  // nil: not currently building
+    const int builder = static_cast<int>(luaL_checknumber(state, 1));
+    const int nano_id = unit_is_building(builder);
+    if (nano_id <= 0) {
+        return 0;
+    }
+    lua_pushinteger(state, nano_id);
+    return 1;
 }
 
 int ui_team_rules_params(lua_State* state) {
-    (void)state;
+    const int team = static_cast<int>(luaL_checknumber(state, 1));
+    std::vector<TeamRuleEntry> rows;
+    team_rules_all(team, rows);
     lua_newtable(state);
+    for (const TeamRuleEntry& row : rows) {
+        if (row.number) {
+            lua_pushnumber(state, row.numeric);
+        } else {
+            lua_pushlstring(state, row.text.data(), row.text.size());
+        }
+        lua_setfield(state, -2, row.key.c_str());
+    }
     return 1;
 }
 
 int ui_team_rules_param(lua_State* state) {
-    (void)state;
-    return 0;
+    const int team = static_cast<int>(luaL_checknumber(state, 1));
+    const char* key = luaL_checkstring(state, 2);
+    TeamRuleEntry row;
+    if (!team_rules_param(team, key, row)) {
+        return 0;
+    }
+    if (row.number) {
+        lua_pushnumber(state, row.numeric);
+    } else {
+        lua_pushlstring(state, row.text.data(), row.text.size());
+    }
+    return 1;
 }
 
 int ui_handler_known(lua_State* state) {
@@ -950,8 +990,8 @@ os.clock = os.clock or function() return 0 end
     set_spring(state, "Echo", ui_echo);
     set_spring(state, "GetTeamRulesParams", ui_team_rules_params);
     set_spring(state, "GetUnitIsBuilding", ui_unit_is_building);
-    set_spring(state, "IsGodModeEnabled", ui_false);
-    set_spring(state, "IsCheatingEnabled", ui_false);
+    set_spring(state, "IsGodModeEnabled", ui_is_god_mode);
+    set_spring(state, "IsCheatingEnabled", ui_is_cheating);
     set_spring(state, "GetTeamRulesParam", ui_team_rules_param);
     set_spring(state, "GetActiveCommand", ui_get_active_command_build);
     set_vfs(state, "SubDirs", ui_subdirs);
@@ -1040,6 +1080,7 @@ end
 }
 
 bool widgets_frame(int frame, std::string& error) {
+    g_frame = frame;
     if (!g_loaded || g_state == nullptr) {
         return true;
     }

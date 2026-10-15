@@ -82,6 +82,22 @@ bool player_issue_build(int unit_id, const std::string& def_name, float x, float
 // Look up a unitDefID by name from the open gadget session. 0 if unknown.
 int player_unitdef_id(const std::string& def_name);
 
+// Spring.GetUnitIsBuilding: nanoframe unit id the builder is constructing, or 0.
+int unit_is_building(int builder_unit_id);
+
+// Spring.GetUnitIsBeingBuilt: true if unit_id is an active nanoframe. progress in [0,1].
+bool unit_is_being_built(int unit_id, float* progress);
+
+// Shared team-rules storage (SetTeamRulesParam from gadgets).
+struct TeamRuleEntry {
+    std::string key;
+    bool number = false;
+    double numeric = 0;
+    std::string text;
+};
+bool team_rules_param(int team, const std::string& key, TeamRuleEntry& out);
+void team_rules_all(int team, std::vector<TeamRuleEntry>& out);
+
 void gadget_session_close();
 
 }  // namespace bar

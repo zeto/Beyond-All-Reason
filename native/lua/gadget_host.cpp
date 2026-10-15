@@ -2113,6 +2113,72 @@ int player_unitdef_id(const std::string& def_name) {
 }
 
 
+
+int unit_is_building(int builder_unit_id) {
+    if (g_session == nullptr || g_session->host == nullptr) {
+        return 0;
+    }
+    for (const LiveOrder& order : g_session->host->live) {
+        if (order.unit == builder_unit_id && order.nano.active && order.nano.unit_id > 0) {
+            return order.nano.unit_id;
+        }
+    }
+    return 0;
+}
+
+bool unit_is_being_built(int unit_id, float* progress) {
+    if (g_session == nullptr || g_session->host == nullptr) {
+        return false;
+    }
+    for (const LiveOrder& order : g_session->host->live) {
+        if (order.nano.active && order.nano.unit_id == unit_id) {
+            if (progress != nullptr) {
+                *progress = order.nano.progress;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool team_rules_param(int team, const std::string& key, TeamRuleEntry& out) {
+    if (g_session == nullptr || g_session->host == nullptr) {
+        return false;
+    }
+    const auto team_at = g_session->host->team_rules.find(team);
+    if (team_at == g_session->host->team_rules.end()) {
+        return false;
+    }
+    const auto key_at = team_at->second.find(key);
+    if (key_at == team_at->second.end()) {
+        return false;
+    }
+    out.key = key;
+    out.number = key_at->second.number;
+    out.numeric = key_at->second.numeric;
+    out.text = key_at->second.text;
+    return true;
+}
+
+void team_rules_all(int team, std::vector<TeamRuleEntry>& out) {
+    out.clear();
+    if (g_session == nullptr || g_session->host == nullptr) {
+        return;
+    }
+    const auto team_at = g_session->host->team_rules.find(team);
+    if (team_at == g_session->host->team_rules.end()) {
+        return;
+    }
+    for (const auto& entry : team_at->second) {
+        TeamRuleEntry row;
+        row.key = entry.first;
+        row.number = entry.second.number;
+        row.numeric = entry.second.numeric;
+        row.text = entry.second.text;
+        out.push_back(row);
+    }
+}
+
 void gadget_session_close() {
     if (g_session == nullptr) {
         return;
@@ -2399,6 +2465,22 @@ void credit_building(const AiEconomy& eco, TeamResources& row, const std::string
     }
 }
 
+
+int alloc_spring_unit_id(Host& host, const UnitSim& sim) {
+    int next_id = 1;
+    for (int id : sim.id) {
+        if (id >= next_id) {
+            next_id = id + 1;
+        }
+    }
+    for (const LiveOrder& order : host.live) {
+        if (order.nano.active && order.nano.unit_id >= next_id) {
+            next_id = order.nano.unit_id + 1;
+        }
+    }
+    return next_id;
+}
+
 bool add_built_unit(const AiEconomy& eco, const LiveOrder& order, int team, int& unit_id, int& def_id,
                     std::string& error) {
     UnitMotion motion;
@@ -2419,12 +2501,8 @@ bool add_built_unit(const AiEconomy& eco, const LiveOrder& order, int team, int&
         min_water = move_class.min_water_depth;
         hover = move_class.hover;
     }
-    int next_id = 1;
-    for (int id : eco.sim->id) {
-        if (id >= next_id) {
-            next_id = id + 1;
-        }
-    }
+    Host& host = *g_session->host;
+    const int next_id = order.nano.unit_id > 0 ? order.nano.unit_id : alloc_spring_unit_id(host, *eco.sim);
     UnitSpawn spawn;
     spawn.id = next_id;
     spawn.team = team;
@@ -2566,6 +2644,8 @@ bool simpleai_drive(const AiEconomy& eco, int frame, std::string& error) {
                 std::cout << "simpleai build " << error << "\n";
                 error.clear();
                 drop.push_back(i);
+            } else {
+                order.nano.unit_id = alloc_spring_unit_id(host, *eco.sim);
             }
             continue;
         }
@@ -2581,9 +2661,10 @@ bool simpleai_drive(const AiEconomy& eco, int frame, std::string& error) {
                 drop.push_back(i);
                 continue;
             }
+            order.nano.unit_id = alloc_spring_unit_id(host, *eco.sim);
             stop_moving(*eco.sim, at);
-            std::cout << "simpleai build " << order.def_name << " unit " << order.unit << " at " << order.nano.x << " "
-                      << order.nano.z << "\n";
+            std::cout << "simpleai build " << order.def_name << " unit " << order.unit << " nano " << order.nano.unit_id
+                      << " at " << order.nano.x << " " << order.nano.z << "\n";
             continue;
         }
         if (eco.sim->has_goal[at] == 0 &&

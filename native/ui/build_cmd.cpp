@@ -13,6 +13,8 @@ namespace bar {
 namespace {
 
 BuildCmdState g_build;
+int g_observed_building = 0;
+int g_observed_builder = 0;
 std::string g_game_root;
 std::vector<CmdDesc> g_last_descs;
 
@@ -59,6 +61,8 @@ void build_cmd_set_root(const std::string& game_root) { g_game_root = game_root;
 const BuildCmdState& build_cmd_state() { return g_build; }
 
 void build_cmd_reset() {
+    g_observed_building = 0;
+    g_observed_builder = 0;
     g_build = BuildCmdState{};
     g_last_descs.clear();
 }
@@ -312,6 +316,13 @@ bool load_build_events(const std::string& path, std::vector<BuildEvent>& events,
 
 bool apply_build_events(UnitSim& sim, const std::vector<BuildEvent>& events, int presented,
                         const TerrainMesh& terrain, int selected_unit_id, std::string& error) {
+    if (selected_unit_id > 0) {
+        g_observed_builder = selected_unit_id;
+        const int building = unit_is_building(selected_unit_id);
+        if (building > 0) {
+            g_observed_building = building;
+        }
+    }
     for (const BuildEvent& event : events) {
         if (event.frame != presented) {
             continue;
@@ -332,6 +343,11 @@ bool apply_build_events(UnitSim& sim, const std::vector<BuildEvent>& events, int
             if (!build_place(sim, selected_unit_id, terrain, error)) {
                 return false;
             }
+            g_observed_builder = selected_unit_id;
+            const int building = unit_is_building(selected_unit_id);
+            if (building > 0) {
+                g_observed_building = building;
+            }
         }
     }
     return true;
@@ -343,10 +359,26 @@ bool write_build_report(const std::string& path, int frame, std::string& error) 
         error = "could not write build report " + path;
         return false;
     }
+    const int builder = g_observed_builder > 0 ? g_observed_builder : 1;
+    const int building_now = unit_is_building(builder);
+    if (building_now > 0) {
+        g_observed_building = building_now;
+    }
+    TeamRuleEntry start_unit;
+    const bool have_start = team_rules_param(0, "startUnit", start_unit);
     out << "{\"f\":" << frame << ",\"cmd\":" << g_build.active_cmd << ",\"def\":\"" << g_build.def_name
         << "\",\"placing\":" << (g_build.placing ? 1 : 0) << ",\"x\":" << g_build.preview_x
         << ",\"z\":" << g_build.preview_z << ",\"fx\":" << g_build.footprint_x << ",\"fz\":" << g_build.footprint_z
-        << "}\n";
+        << ",\"builder\":" << builder << ",\"building\":" << g_observed_building
+        << ",\"buildingNow\":" << building_now;
+    if (have_start && start_unit.number) {
+        out << ",\"startUnit\":" << static_cast<int>(start_unit.numeric);
+    } else if (have_start) {
+        out << ",\"startUnit\":\"" << start_unit.text << "\"";
+    } else {
+        out << ",\"startUnit\":null";
+    }
+    out << "}\n";
     if (!out) {
         error = "failed while writing " + path;
         return false;
