@@ -3,6 +3,8 @@
 #include "gl/gl_api.h"
 #include "selection.h"
 #include "build_cmd.h"
+#include "minimap.h"
+#include "camera.h"
 #include "gadget_host.h"
 
 extern "C" {
@@ -44,6 +46,9 @@ bool g_mod_shift = false;
 int g_frame = 0;
 UnitSim* g_sim = nullptr;
 const TerrainMesh* g_terrain = nullptr;
+Camera* g_camera = nullptr;
+bool g_minimap_draw = true;
+bool g_minimap_update = true;
 float g_view_proj[16] = {};
 bool g_have_view_proj = false;
 bool g_grid_draw = true;
@@ -128,7 +133,9 @@ int ui_config_string(lua_State* state) {
 int ui_view_geometry(lua_State* state) {
     lua_pushinteger(state, gl_view_width());
     lua_pushinteger(state, gl_view_height());
-    return 2;
+    lua_pushinteger(state, 0);  // viewPosX
+    lua_pushinteger(state, 0);  // viewPosY
+    return 4;
 }
 
 int ui_ground_extremes(lua_State* state) {
@@ -195,6 +202,38 @@ int ui_gui_hidden(lua_State* state) {
 
 int ui_noop(lua_State* state) {
     (void)state;
+    return 0;
+}
+
+
+int gl_slave_minimap(lua_State* state) {
+    const bool slave = lua_toboolean(state, 1) != 0;
+    minimap_set_slave(slave);
+    return 0;
+}
+
+int gl_draw_minimap(lua_State* state) {
+    (void)state;
+    // Content is appended in C++ after DrawScreen via minimap_append_draw.
+    return 0;
+}
+
+int ui_send_commands(lua_State* state) {
+    const int top = lua_gettop(state);
+    for (int i = 1; i <= top; ++i) {
+        if (lua_isstring(state, i)) {
+            minimap_send_command(lua_tostring(state, i));
+        } else if (lua_istable(state, i)) {
+            const int n = static_cast<int>(lua_objlen(state, i));
+            for (int k = 1; k <= n; ++k) {
+                lua_rawgeti(state, i, k);
+                if (lua_isstring(state, -1)) {
+                    minimap_send_command(lua_tostring(state, -1));
+                }
+                lua_pop(state, 1);
+            }
+        }
+    }
     return 0;
 }
 
@@ -432,13 +471,13 @@ int ui_get_mod_keys(lua_State* state) {
 }
 
 int ui_get_minimap_geometry(lua_State* state) {
-    // Minimap is not hosted yet. Returning minimized keeps the selectionbox off that path.
-    lua_pushnumber(state, 0);
-    lua_pushnumber(state, 0);
-    lua_pushnumber(state, 0);
-    lua_pushnumber(state, 0);
-    lua_pushboolean(state, 1);  // minimized
-    lua_pushboolean(state, 0);
+    const MinimapGeometry& geo = minimap_geometry();
+    lua_pushnumber(state, geo.px);
+    lua_pushnumber(state, geo.py);
+    lua_pushnumber(state, geo.sx);
+    lua_pushnumber(state, geo.sy);
+    lua_pushboolean(state, geo.minimized ? 1 : 0);
+    lua_pushboolean(state, geo.maximized ? 1 : 0);
     return 6;
 }
 
@@ -518,6 +557,12 @@ int ui_handler_update_callin(lua_State* state) {
         } else if (callin == "Update") {
             g_grid_update = true;
         }
+    } else if (g_current_widget == "bar_ui_minimap") {
+        if (callin == "DrawScreen") {
+            g_minimap_draw = true;
+        } else if (callin == "Update") {
+            g_minimap_update = true;
+        }
     }
     return 0;
 }
@@ -539,6 +584,12 @@ int ui_handler_remove_callin(lua_State* state) {
             g_grid_draw = false;
         } else if (callin == "Update") {
             g_grid_update = false;
+        }
+    } else if (g_current_widget == "bar_ui_minimap") {
+        if (callin == "DrawScreen") {
+            g_minimap_draw = false;
+        } else if (callin == "Update") {
+            g_minimap_update = false;
         }
     }
     return 0;
@@ -760,6 +811,72 @@ int ui_echo(lua_State* state) {
 
 
 
+
+int ui_slave_minimap(lua_State* state) {
+    // Actually on gl table - see gl_install hook below
+    (void)state;
+    return 0;
+}
+
+int ui_get_camera_state(lua_State* state) {
+    lua_newtable(state);
+    lua_pushstring(state, "ta");
+    lua_setfield(state, -2, "name");
+    if (g_camera != nullptr) {
+        lua_pushnumber(state, g_camera->target_x);
+        lua_setfield(state, -2, "px");
+        lua_pushnumber(state, g_camera->target_y);
+        lua_setfield(state, -2, "py");
+        lua_pushnumber(state, g_camera->target_z);
+        lua_setfield(state, -2, "pz");
+        lua_pushnumber(state, g_camera->distance);
+        lua_setfield(state, -2, "height");
+        lua_pushnumber(state, g_camera->tilt);
+        lua_setfield(state, -2, "angle");
+        lua_pushnumber(state, g_camera->yaw);
+        lua_setfield(state, -2, "ry");
+    }
+    return 1;
+}
+
+int ui_set_camera_target(lua_State* state) {
+    if (g_camera == nullptr) {
+        return 0;
+    }
+    g_camera->target_x = static_cast<float>(luaL_checknumber(state, 1));
+    g_camera->target_y = static_cast<float>(luaL_checknumber(state, 2));
+    g_camera->target_z = static_cast<float>(luaL_checknumber(state, 3));
+    return 0;
+}
+
+int ui_get_ground_height(lua_State* state) {
+    const float x = static_cast<float>(luaL_checknumber(state, 1));
+    const float z = static_cast<float>(luaL_checknumber(state, 2));
+    if (g_terrain == nullptr) {
+        lua_pushnumber(state, 0);
+        return 1;
+    }
+    lua_pushnumber(state, terrain_height_at(*g_terrain, x, z));
+    return 1;
+}
+
+int ui_get_all_units(lua_State* state) {
+    lua_newtable(state);
+    if (g_sim == nullptr) {
+        return 1;
+    }
+    for (size_t i = 0; i < g_sim->id.size(); ++i) {
+        lua_pushinteger(state, g_sim->id[i]);
+        lua_rawseti(state, -2, static_cast<int>(i) + 1);
+    }
+    return 1;
+}
+
+int ui_get_minimap_rotation(lua_State* state) {
+    lua_pushnumber(state, 0);
+    return 1;
+}
+
 // Single-player bar-metal has no god-mode toggle; always reports false.
 int ui_is_god_mode(lua_State* state) {
     lua_pushboolean(state, 0);
@@ -868,6 +985,14 @@ bool widgets_load(lua_State* state, const WidgetEnv& env, std::string& error) {
     gl_set_root(env.game_root);
     gl_set_view(env.view_w, env.view_h);
     gl_install(state);
+    lua_getglobal(state, "gl");
+    if (lua_istable(state, -1)) {
+        lua_pushcfunction(state, gl_slave_minimap);
+        lua_setfield(state, -2, "SlaveMiniMap");
+        lua_pushcfunction(state, gl_draw_minimap);
+        lua_setfield(state, -2, "DrawMiniMap");
+    }
+    lua_pop(state, 1);
 
     if (!run_chunk(state, R"LUA(
 function math.round(value)
@@ -947,7 +1072,19 @@ os.clock = os.clock or function() return 0 end
     lua_setfield(state, -2, "windMin");
     lua_pushlstring(state, env.map_name.data(), env.map_name.size());
     lua_setfield(state, -2, "mapName");
+    lua_getfield(state, -1, "mapSizeX");
+    const double map_size_x = lua_tonumber(state, -1);
     lua_pop(state, 1);
+    lua_getfield(state, -1, "mapSizeZ");
+    const double map_size_z = lua_tonumber(state, -1);
+    lua_pop(state, 1);
+    lua_pushnumber(state, map_size_x / 512.0);
+    lua_setfield(state, -2, "mapX");
+    lua_pushnumber(state, map_size_z / 512.0);
+    lua_setfield(state, -2, "mapY");
+    lua_pop(state, 1);
+    minimap_reset();
+    minimap_set_world(static_cast<float>(map_size_x), static_cast<float>(map_size_z), env.view_w, env.view_h);
 
     set_spring(state, "GetConfigInt", ui_config_number);
     set_spring(state, "GetConfigFloat", ui_config_number);
@@ -962,7 +1099,7 @@ os.clock = os.clock or function() return 0 end
     set_spring(state, "GetGameSpeed", ui_game_speed);
     set_spring(state, "GetWind", ui_wind);
     set_spring(state, "IsGUIHidden", ui_gui_hidden);
-    set_spring(state, "SendCommands", ui_noop);
+    set_spring(state, "SendCommands", ui_send_commands);
     set_spring(state, "SetMouseCursor", ui_set_mouse_cursor);
     set_spring(state, "GetMouseCursor", ui_get_mouse_cursor);
     set_spring(state, "GetSelectionBox", ui_get_selection_box);
@@ -993,6 +1130,11 @@ os.clock = os.clock or function() return 0 end
     set_spring(state, "IsGodModeEnabled", ui_is_god_mode);
     set_spring(state, "IsCheatingEnabled", ui_is_cheating);
     set_spring(state, "GetTeamRulesParam", ui_team_rules_param);
+    set_spring(state, "GetCameraState", ui_get_camera_state);
+    set_spring(state, "SetCameraTarget", ui_set_camera_target);
+    set_spring(state, "GetGroundHeight", ui_get_ground_height);
+    set_spring(state, "GetAllUnits", ui_get_all_units);
+    set_spring(state, "GetMiniMapRotation", ui_get_minimap_rotation);
     set_spring(state, "GetActiveCommand", ui_get_active_command_build);
     set_vfs(state, "SubDirs", ui_subdirs);
     set_vfs(state, "DirList", ui_dir_list);
@@ -1043,12 +1185,14 @@ end
     const std::string top_path = env.game_root + "/luaui/Widgets/gui_top_bar.lua";
     const std::string select_path = env.game_root + "/luaui/Widgets/gui_selectionbox.lua";
     const std::string grid_path = env.game_root + "/luaui/Widgets/gui_gridmenu.lua";
+    const std::string minimap_path = env.game_root + "/luaui/Widgets/gui_minimap.lua";
     build_cmd_set_root(env.game_root);
     build_cmd_reset();
     if (!load_widget(state, font_path, "bar_ui_font", error) || !load_widget(state, flow_path, "bar_ui_flow", error) ||
         !load_widget(state, top_path, "bar_ui_top", error) ||
         !load_widget(state, select_path, "bar_ui_select", error) ||
-        !load_widget(state, grid_path, "bar_ui_grid", error)) {
+        !load_widget(state, grid_path, "bar_ui_grid", error) ||
+        !load_widget(state, minimap_path, "bar_ui_minimap", error)) {
         return false;
     }
     if (!call_registry(state, "bar_ui_font", "Initialize", nullptr, 0, true, error) ||
@@ -1066,6 +1210,12 @@ end
     g_grid_draw = true;
     g_grid_update = true;
     if (!call_registry(state, "bar_ui_grid", "Initialize", nullptr, 0, true, error)) {
+        return false;
+    }
+    g_current_widget = "bar_ui_minimap";
+    g_minimap_draw = true;
+    g_minimap_update = true;
+    if (!call_registry(state, "bar_ui_minimap", "Initialize", nullptr, 0, true, error)) {
         return false;
     }
     g_current_widget.clear();
@@ -1100,7 +1250,14 @@ bool widgets_frame(int frame, std::string& error) {
                 return false;
             }
         }
+        g_current_widget = "bar_ui_minimap";
+        if (!call_registry(state, "bar_ui_minimap", "ViewResize", nullptr, 0, false, error)) {
+            return false;
+        }
         g_current_widget.clear();
+        if (g_terrain != nullptr) {
+            minimap_set_world(g_terrain->world_x, g_terrain->world_z, g_next_w, g_next_h);
+        }
         g_applied_w = g_next_w;
         g_applied_h = g_next_h;
     }
@@ -1134,12 +1291,24 @@ bool widgets_frame(int frame, std::string& error) {
             return false;
         }
     }
+    g_current_widget = "bar_ui_minimap";
+    if (g_minimap_update) {
+        if (!call_registry(state, "bar_ui_minimap", "Update", &step, 1, false, error)) {
+            return false;
+        }
+    }
+    if (g_minimap_draw) {
+        if (!call_registry(state, "bar_ui_minimap", "DrawScreen", nullptr, 0, false, error)) {
+            return false;
+        }
+    }
     g_current_widget.clear();
     g_hud = gl_publish();
     selection_append_highlights(g_hud);
     if (g_have_view_proj) {
         build_append_preview(g_hud, g_view_proj, gl_view_width(), gl_view_height());
     }
+    minimap_append_draw(g_hud, g_sim);
     return true;
 }
 
@@ -1216,18 +1385,27 @@ bool widgets_mouse_press(float x, float y, int button, std::string& error) {
     if (!g_loaded || g_state == nullptr) {
         return true;
     }
-    g_current_widget = "bar_ui_select";
     const double args[3] = {x, y, static_cast<double>(button)};
+    g_current_widget = "bar_ui_minimap";
+    if (!call_registry(g_state, "bar_ui_minimap", "MousePress", args, 3, false, error)) {
+        g_current_widget.clear();
+        return false;
+    }
+    g_current_widget = "bar_ui_select";
     const bool ok = call_registry(g_state, "bar_ui_select", "MousePress", args, 3, false, error);
     g_current_widget.clear();
     return ok;
 }
 
 const HudList* hud_list() {
-    if (!g_loaded || (g_hud.vertices.empty() && g_hud.texts.empty())) {
+    if (!g_loaded || (g_hud.vertices.empty() && g_hud.texts.empty() && !g_hud.minimap_active)) {
         return nullptr;
     }
     return &g_hud;
+}
+
+void widgets_set_camera(Camera* camera) {
+    g_camera = camera;
 }
 
 }  // namespace bar

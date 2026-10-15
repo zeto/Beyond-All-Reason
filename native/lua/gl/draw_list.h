@@ -37,6 +37,12 @@ struct HudList {
     std::vector<HudText> texts;
     int width = 0;
     int height = 0;
+    // Engine slave minimap panel (map texture). Screen y grows up from bottom.
+    bool minimap_active = false;
+    float minimap_left = 0;
+    float minimap_right = 0;
+    float minimap_bottom = 0;
+    float minimap_top = 0;
 };
 
 }  // namespace bar

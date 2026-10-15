@@ -24,6 +24,7 @@
 #include "widget_host.h"
 #include "selection.h"
 #include "build_cmd.h"
+#include "minimap.h"
 #include "move/unit_sim.h"
 #include "smf.h"
 #include "unit_spawn.h"
@@ -678,6 +679,7 @@ int run_terrain(const Options& options, const std::string& game_name) {
     std::vector<bar::ScriptOrder> orders;
     std::vector<bar::SelectEvent> select_events;
     std::vector<bar::BuildEvent> build_events;
+    std::vector<bar::MinimapEvent> minimap_events;
     if (!options.orders.empty() && !bar::load_orders(options.orders, orders, error)) {
         std::cerr << "orders: " << error << "\n";
         return 1;
@@ -688,6 +690,10 @@ int run_terrain(const Options& options, const std::string& game_name) {
             return 1;
         }
         if (!bar::load_build_events(options.input, build_events, error)) {
+            std::cerr << "input: " << error << "\n";
+            return 1;
+        }
+        if (!bar::load_minimap_events(options.input, minimap_events, error)) {
             std::cerr << "input: " << error << "\n";
             return 1;
         }
@@ -1118,6 +1124,8 @@ int run_terrain(const Options& options, const std::string& game_name) {
                 }
             }
             bar::widgets_set_sim(&sim, &mesh);
+            bar::widgets_set_camera(&camera);
+            bar::minimap_set_world(mesh.world_x, mesh.world_z, camera.view_width, camera.view_height);
             bar::widgets_set_view_proj(pose.view_proj);
             if (scripted) {
                 if (!bar::apply_select_events(sim, select_events, presented, mesh, error)) {
@@ -1133,6 +1141,10 @@ int run_terrain(const Options& options, const std::string& game_name) {
                                          ? 0
                                          : bar::selection_snapshot().selected.front();
                 if (!bar::apply_build_events(sim, build_events, presented, mesh, selected, error)) {
+                    std::cerr << "input: " << error << "\n";
+                    return 1;
+                }
+                if (!bar::apply_minimap_events(sim, minimap_events, presented, mesh, camera, error)) {
                     std::cerr << "input: " << error << "\n";
                     return 1;
                 }
@@ -1514,6 +1526,18 @@ int run_terrain(const Options& options, const std::string& game_name) {
             return 1;
         }
         std::cout << "build: " << build_path.string() << "\n";
+    }
+    {
+        const std::filesystem::path mmap_path =
+            options.trace.empty() ? std::filesystem::path("native/oracle/out/m7minimap/minimap.json")
+                                  : std::filesystem::path(options.trace).parent_path() / "minimap.json";
+        std::error_code ec;
+        std::filesystem::create_directories(mmap_path.parent_path(), ec);
+        if (!bar::write_minimap_report(mmap_path.string(), presented, error)) {
+            std::cerr << "minimap: " << error << "\n";
+            return 1;
+        }
+        std::cout << "minimap: " << mmap_path.string() << "\n";
     }
     std::cout << "presented " << presented << "\n";
     if (scripted && !sim.x.empty()) {

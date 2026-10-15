@@ -1,0 +1,4 @@
+# M7 minimap: select commander, click minimap toward world ~8000,4900.
+# Geometry after gui_minimap ViewResize is top-docked ~230x230 on 1280x720.
+5 box 400 200 900 520
+25 mmap 150 628

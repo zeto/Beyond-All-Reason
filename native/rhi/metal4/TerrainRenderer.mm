@@ -29,8 +29,10 @@ struct FrameSlot {
     id<MTLTexture> hud_atlas = nil;
     id<MTLBuffer> hud_color = nil;
     id<MTLBuffer> hud_text_verts = nil;
+    id<MTLBuffer> hud_minimap = nil;
     NSUInteger hud_color_count = 0;
     NSUInteger hud_text_count = 0;
+    NSUInteger hud_minimap_count = 0;
     uint64_t ticket = 0;
     bool pending = false;
 };
@@ -112,8 +114,13 @@ void retire_slot(id<MTLResidencySet> residency, FrameSlot& slot) {
         [residency removeAllocation:slot.hud_text_verts];
         slot.hud_text_verts = nil;
     }
+    if (slot.hud_minimap != nil) {
+        [residency removeAllocation:slot.hud_minimap];
+        slot.hud_minimap = nil;
+    }
     slot.hud_color_count = 0;
     slot.hud_text_count = 0;
+    slot.hud_minimap_count = 0;
     if (slot.allocator != nil) {
         [slot.allocator reset];
     }
@@ -528,8 +535,13 @@ void TerrainRenderer::release_hud() {
         [impl_->residency removeAllocation:slot->hud_text_verts];
         slot->hud_text_verts = nil;
     }
+    if (slot->hud_minimap != nil) {
+        [impl_->residency removeAllocation:slot->hud_minimap];
+        slot->hud_minimap = nil;
+    }
     slot->hud_color_count = 0;
     slot->hud_text_count = 0;
+    slot->hud_minimap_count = 0;
 }
 
 bool TerrainRenderer::prepare_hud(const HudList* list, std::string& error) {
@@ -610,6 +622,24 @@ bool TerrainRenderer::prepare_hud(const HudList* list, std::string& error) {
                               withBytes:atlas.data()
                             bytesPerRow:kHudAtlasW * 4];
     }
+    if (list->minimap_active && impl_->minimap != nil) {
+        std::vector<HudGpuVertex> mm;
+        const HudGpuVertex corners[4] = {
+            hud_vert(list->minimap_left, list->minimap_bottom, 0, 1, 1, 1, 1, 1, view_w, view_h),
+            hud_vert(list->minimap_right, list->minimap_bottom, 1, 1, 1, 1, 1, 1, view_w, view_h),
+            hud_vert(list->minimap_right, list->minimap_top, 1, 0, 1, 1, 1, 1, view_w, view_h),
+            hud_vert(list->minimap_left, list->minimap_top, 0, 0, 1, 1, 1, 1, view_w, view_h),
+        };
+        append_triangle(mm, corners[0], corners[1], corners[2]);
+        append_triangle(mm, corners[0], corners[2], corners[3]);
+        slot->hud_minimap = upload(impl_->device, mm.data(), mm.size() * sizeof(HudGpuVertex));
+        if (slot->hud_minimap == nil) {
+            error = "hud minimap buffer allocation failed";
+            return false;
+        }
+        slot->hud_minimap_count = mm.size();
+        [impl_->residency addAllocation:slot->hud_minimap];
+    }
     if (!color.empty()) {
         slot->hud_color = upload(impl_->device, color.data(), color.size() * sizeof(HudGpuVertex));
         if (slot->hud_color == nil) {
@@ -633,7 +663,8 @@ bool TerrainRenderer::prepare_hud(const HudList* list, std::string& error) {
 
 void TerrainRenderer::encode_hud(void* command_buffer, void* target) {
     FrameSlot* slot = impl_->active;
-    if (slot == nullptr || (slot->hud_color_count == 0 && slot->hud_text_count == 0)) {
+    if (slot == nullptr ||
+        (slot->hud_color_count == 0 && slot->hud_text_count == 0 && slot->hud_minimap_count == 0)) {
         return;
     }
     id<MTL4CommandBuffer> buffer = (__bridge id<MTL4CommandBuffer>)command_buffer;
@@ -647,6 +678,13 @@ void TerrainRenderer::encode_hud(void* command_buffer, void* target) {
     [encoder setViewport:viewport];
     [encoder setCullMode:MTLCullModeNone];
     [encoder setArgumentTable:impl_->arguments atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+    if (slot->hud_minimap_count > 0 && slot->hud_minimap != nil && impl_->hud_text_pipeline != nil &&
+        impl_->minimap != nil) {
+        [impl_->arguments setTexture:impl_->minimap.gpuResourceID atIndex:0];
+        [impl_->arguments setAddress:slot->hud_minimap.gpuAddress atIndex:1];
+        [encoder setRenderPipelineState:impl_->hud_text_pipeline];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:slot->hud_minimap_count];
+    }
     if (slot->hud_color_count > 0 && slot->hud_color != nil && impl_->hud_color_pipeline != nil) {
         [impl_->arguments setAddress:slot->hud_color.gpuAddress atIndex:1];
         [encoder setRenderPipelineState:impl_->hud_color_pipeline];

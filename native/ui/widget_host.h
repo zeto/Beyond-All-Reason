@@ -3,6 +3,7 @@
 #include "gl/draw_list.h"
 #include "move/unit_sim.h"
 #include "smf.h"
+#include "camera.h"
 
 #include <string>
 #include <vector>
@@ -39,6 +40,8 @@ bool widgets_selection_changed(const std::vector<int>& unit_ids, std::string& er
 
 // Bind the live sim for GetUnitCmdDescs / build placement.
 void widgets_set_sim(UnitSim* sim, const TerrainMesh* terrain);
+
+void widgets_set_camera(Camera* camera);
 
 // Projected view matrix for the footprint preview (16 floats). Null clears it.
 void widgets_set_view_proj(const float* view_proj16);
