@@ -201,22 +201,18 @@ void minimap_append_draw(HudList& hud, const UnitSim* sim) {
     hud.minimap_right = right;
     hud.minimap_bottom = bottom;
     hud.minimap_top = top;
-    // Unit 0 marker (only unit drawn on the minimap per PIN).
+    hud.minimap_marker = false;
+    // Unit 0 marker (only unit drawn on the minimap per PIN). Drawn after the map
+    // texture in encode_hud so it stays visible at any drawable size.
     if (sim != nullptr && !sim->id.empty()) {
         const float u = sim->x[0] / g_world_x;
         const float v = sim->z[0] / g_world_z;  // 0 at north/top of panel
-        const float mx = left + u * (right - left);
-        const float my = top - v * (top - bottom);
-        const float half = 4.f;
-        const HudVertex corners[4] = {
-            {mx - half, my - half, 0.2f, 0.9f, 0.3f, 1.f},
-            {mx + half, my - half, 0.2f, 0.9f, 0.3f, 1.f},
-            {mx + half, my + half, 0.2f, 0.9f, 0.3f, 1.f},
-            {mx - half, my + half, 0.2f, 0.9f, 0.3f, 1.f},
-        };
-        for (const HudVertex& vert : corners) {
-            hud.vertices.push_back(vert);
-        }
+        const float panel = std::max(right - left, top - bottom);
+        const float half = std::max(4.f, panel * 0.018f);
+        hud.minimap_marker = true;
+        hud.minimap_marker_x = left + u * (right - left);
+        hud.minimap_marker_y = top - v * (top - bottom);
+        hud.minimap_marker_half = half;
     }
 }
 

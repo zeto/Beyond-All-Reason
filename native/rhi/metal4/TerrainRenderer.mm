@@ -30,9 +30,11 @@ struct FrameSlot {
     id<MTLBuffer> hud_color = nil;
     id<MTLBuffer> hud_text_verts = nil;
     id<MTLBuffer> hud_minimap = nil;
+    id<MTLBuffer> hud_marker = nil;
     NSUInteger hud_color_count = 0;
     NSUInteger hud_text_count = 0;
     NSUInteger hud_minimap_count = 0;
+    NSUInteger hud_marker_count = 0;
     uint64_t ticket = 0;
     bool pending = false;
 };
@@ -118,9 +120,14 @@ void retire_slot(id<MTLResidencySet> residency, FrameSlot& slot) {
         [residency removeAllocation:slot.hud_minimap];
         slot.hud_minimap = nil;
     }
+    if (slot.hud_marker != nil) {
+        [residency removeAllocation:slot.hud_marker];
+        slot.hud_marker = nil;
+    }
     slot.hud_color_count = 0;
     slot.hud_text_count = 0;
     slot.hud_minimap_count = 0;
+    slot.hud_marker_count = 0;
     if (slot.allocator != nil) {
         [slot.allocator reset];
     }
@@ -539,14 +546,20 @@ void TerrainRenderer::release_hud() {
         [impl_->residency removeAllocation:slot->hud_minimap];
         slot->hud_minimap = nil;
     }
+    if (slot->hud_marker != nil) {
+        [impl_->residency removeAllocation:slot->hud_marker];
+        slot->hud_marker = nil;
+    }
     slot->hud_color_count = 0;
     slot->hud_text_count = 0;
     slot->hud_minimap_count = 0;
+    slot->hud_marker_count = 0;
 }
 
 bool TerrainRenderer::prepare_hud(const HudList* list, std::string& error) {
     release_hud();
-    if (list == nullptr || (list->vertices.empty() && list->texts.empty())) {
+    if (list == nullptr ||
+        (list->vertices.empty() && list->texts.empty() && !list->minimap_active && !list->minimap_marker)) {
         return true;
     }
     const float view_w = list->width > 0 ? static_cast<float>(list->width) : 1280.f;
@@ -640,6 +653,27 @@ bool TerrainRenderer::prepare_hud(const HudList* list, std::string& error) {
         slot->hud_minimap_count = mm.size();
         [impl_->residency addAllocation:slot->hud_minimap];
     }
+    if (list->minimap_marker) {
+        const float hx = list->minimap_marker_half;
+        const float mx = list->minimap_marker_x;
+        const float my = list->minimap_marker_y;
+        std::vector<HudGpuVertex> mk;
+        const HudGpuVertex corners[4] = {
+            hud_vert(mx - hx, my - hx, 0, 0, 0.2f, 0.9f, 0.3f, 1.f, view_w, view_h),
+            hud_vert(mx + hx, my - hx, 0, 0, 0.2f, 0.9f, 0.3f, 1.f, view_w, view_h),
+            hud_vert(mx + hx, my + hx, 0, 0, 0.2f, 0.9f, 0.3f, 1.f, view_w, view_h),
+            hud_vert(mx - hx, my + hx, 0, 0, 0.2f, 0.9f, 0.3f, 1.f, view_w, view_h),
+        };
+        append_triangle(mk, corners[0], corners[1], corners[2]);
+        append_triangle(mk, corners[0], corners[2], corners[3]);
+        slot->hud_marker = upload(impl_->device, mk.data(), mk.size() * sizeof(HudGpuVertex));
+        if (slot->hud_marker == nil) {
+            error = "hud marker buffer allocation failed";
+            return false;
+        }
+        slot->hud_marker_count = mk.size();
+        [impl_->residency addAllocation:slot->hud_marker];
+    }
     if (!color.empty()) {
         slot->hud_color = upload(impl_->device, color.data(), color.size() * sizeof(HudGpuVertex));
         if (slot->hud_color == nil) {
@@ -664,7 +698,8 @@ bool TerrainRenderer::prepare_hud(const HudList* list, std::string& error) {
 void TerrainRenderer::encode_hud(void* command_buffer, void* target) {
     FrameSlot* slot = impl_->active;
     if (slot == nullptr ||
-        (slot->hud_color_count == 0 && slot->hud_text_count == 0 && slot->hud_minimap_count == 0)) {
+        (slot->hud_color_count == 0 && slot->hud_text_count == 0 && slot->hud_minimap_count == 0 &&
+         slot->hud_marker_count == 0)) {
         return;
     }
     id<MTL4CommandBuffer> buffer = (__bridge id<MTL4CommandBuffer>)command_buffer;
@@ -691,6 +726,12 @@ void TerrainRenderer::encode_hud(void* command_buffer, void* target) {
         [impl_->arguments setAddress:slot->hud_minimap.gpuAddress atIndex:1];
         [encoder setRenderPipelineState:impl_->hud_text_pipeline];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:slot->hud_minimap_count];
+    }
+    // Unit marker above the map texture (and above any leftover FlowUI chrome).
+    if (slot->hud_marker_count > 0 && slot->hud_marker != nil && impl_->hud_color_pipeline != nil) {
+        [impl_->arguments setAddress:slot->hud_marker.gpuAddress atIndex:1];
+        [encoder setRenderPipelineState:impl_->hud_color_pipeline];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:slot->hud_marker_count];
     }
     if (slot->hud_text_count > 0 && slot->hud_text_verts != nil && impl_->hud_text_pipeline != nil &&
         slot->hud_atlas != nil) {

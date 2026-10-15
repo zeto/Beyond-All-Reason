@@ -1554,7 +1554,7 @@ bool widgets_mouse_press(float x, float y, int button, std::string& error) {
 }
 
 const HudList* hud_list() {
-    if (!g_loaded || (g_hud.vertices.empty() && g_hud.texts.empty() && !g_hud.minimap_active)) {
+    if (!g_loaded || (g_hud.vertices.empty() && g_hud.texts.empty() && !g_hud.minimap_active && !g_hud.minimap_marker)) {
         return nullptr;
     }
     return &g_hud;

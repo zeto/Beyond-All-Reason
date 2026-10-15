@@ -43,6 +43,11 @@ struct HudList {
     float minimap_right = 0;
     float minimap_bottom = 0;
     float minimap_top = 0;
+    // Unit-0 marker drawn after the map texture (so chrome underlay cannot hide it).
+    bool minimap_marker = false;
+    float minimap_marker_x = 0;
+    float minimap_marker_y = 0;
+    float minimap_marker_half = 4;
 };
 
 }  // namespace bar

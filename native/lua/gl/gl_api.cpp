@@ -108,6 +108,10 @@ struct Recorder {
     float line_width = 1;
     bool line_stipple = false;
     int bind = 0;
+    // True after Texture(":path:") / non-numeric bind we cannot load. Vertex quads
+    // (DrawRect glow, TexturedRectRound tiles) must not fall back to solid color —
+    // that painted barHeight*7 glow slabs as oversized grey rectangles around the top bar.
+    bool texture_missing = false;
     int recording = 0;
     int next_list = 1;
     int next_tex = 1;
@@ -135,32 +139,6 @@ Mat* active_matrix() {
 
 std::vector<Mat>* active_stack() {
     return g.mode == kTexture ? &g.texture_stack : &g.model_stack;
-}
-
-void emit_quad(const Corner& a, const Corner& b, const Corner& c, const Corner& d) {
-    const Corner* corners[4] = {&a, &b, &c, &d};
-    HudVertex out[4];
-    for (int i = 0; i < 4; ++i) {
-        float x = 0;
-        float y = 0;
-        transform_point(g.model, corners[i]->x, corners[i]->y, corners[i]->z, x, y);
-        if (!finite_xy(x, y)) {
-            return;
-        }
-        out[i].x = x;
-        out[i].y = y;
-        out[i].r = corners[i]->r;
-        out[i].g = corners[i]->g;
-        out[i].b = corners[i]->b;
-        out[i].a = corners[i]->a;
-    }
-    Geo* geo = &g.screen;
-    g.textures;  // textures are addressed below when a render target is current
-    (void)geo;
-}
-
-Geo* current_geo() {
-    return &g.screen;
 }
 
 int g_target = 0;
@@ -377,9 +355,8 @@ void play(const Op& op) {
             flush_batch();
             if (op.i > 0) {
                 replay_texture(op.i, op.f[0], op.f[1], op.f[2], op.f[3], op.f[4], op.f[5], op.f[6], op.f[7]);
-            } else {
-                color_rect(op.f[0], op.f[1], op.f[2], op.f[3], op.f[4], op.f[5], op.f[6], op.f[7]);
             }
+            // i==0: skip (see note_texrect); do not invent a solid rotating square.
             break;
         case Kind::Push:
             flush_batch();
@@ -451,6 +428,9 @@ void add_op(Op op) {
 }
 
 void note_vertex(float x, float y, float z) {
+    if (g.texture_missing) {
+        return;
+    }
     if (g.recording != 0) {
         Op op;
         op.kind = Kind::Vertex;
@@ -479,6 +459,9 @@ void note_vertex(float x, float y, float z) {
 }
 
 void note_texrect(float x1, float y1, float x2, float y2) {
+    if (g.texture_missing) {
+        return;
+    }
     if (g.recording != 0) {
         Op op;
         op.kind = Kind::TexRect;
@@ -496,9 +479,9 @@ void note_texrect(float x1, float y1, float x2, float y2) {
     }
     if (g.bind > 0) {
         replay_texture(g.bind, x1, y1, x2, y2, g.cr, g.cg, g.cb, g.ca);
-    } else {
-        color_rect(x1, y1, x2, y2, g.cr, g.cg, g.cb, g.ca);
     }
+    // Unbound TexRect used to fill a solid color quad. That turned the wind-blades
+    // icon (Texture(":n:...png") is not a numeric bind) into a rotating white square.
 }
 
 void note_text(HudText text) {
@@ -585,8 +568,16 @@ int gl_color(lua_State* state) {
 int gl_texture(lua_State* state) {
     if (lua_isnumber(state, 1) != 0) {
         g.bind = static_cast<int>(lua_tonumber(state, 1));
+        g.texture_missing = false;
+        return 0;
+    }
+    // Texture(false) / nil: solid draws OK. String path: we have no image loader, so
+    // mark missing and skip subsequent Vertex batches (see note_vertex).
+    g.bind = 0;
+    if (lua_isboolean(state, 1) != 0 || lua_isnil(state, 1) != 0 || lua_gettop(state) < 1) {
+        g.texture_missing = false;
     } else {
-        g.bind = 0;
+        g.texture_missing = true;
     }
     return 0;
 }
@@ -638,6 +629,9 @@ int gl_create_list(lua_State* state) {
     const int rc = lua_pcall(state, top - 1, 0, 0);
     g.recording = previous;
     g.batch.clear();
+    // CreateList may end after Texture(":path:") without Texture(false); do not leak
+    // texture_missing into later lists (would drop solid RectRound bar fills).
+    g.texture_missing = false;
     if (rc != 0) {
         return lua_error(state);
     }
@@ -828,21 +822,46 @@ int gl_render_to_texture(lua_State* state) {
     return 0;
 }
 
-void erase_scissor_text(Geo& geo) {
+void erase_scissor_region(Geo& geo) {
     if (geo.width <= 0 || geo.height <= 0) {
         return;
     }
-    std::vector<HudText> kept;
-    kept.reserve(geo.texts.size());
+    const float x0 = g.sx;
+    const float y0 = g.sy;
+    const float x1 = g.sx + g.sw;
+    const float y1 = g.sy + g.sh;
+    std::vector<HudText> kept_text;
+    kept_text.reserve(geo.texts.size());
     for (const HudText& text : geo.texts) {
         const float px = (text.x * 0.5f + 0.5f) * static_cast<float>(geo.width);
         const float py = (text.y * 0.5f + 0.5f) * static_cast<float>(geo.height);
-        const bool inside = px >= g.sx && py >= g.sy && px <= g.sx + g.sw && py <= g.sy + g.sh;
+        const bool inside = px >= x0 && py >= y0 && px <= x1 && py <= y1;
         if (!inside) {
-            kept.push_back(text);
+            kept_text.push_back(text);
         }
     }
-    geo.texts.swap(kept);
+    geo.texts.swap(kept_text);
+    // Partial R2T updates used to only drop text, so bar/glow verts accumulated every
+    // frame and the top bar grew into an oversized grey slab.
+    std::vector<HudVertex> kept_verts;
+    kept_verts.reserve(geo.verts.size());
+    for (size_t i = 0; i + 3 < geo.verts.size(); i += 4) {
+        const HudVertex& a = geo.verts[i];
+        const HudVertex& c = geo.verts[i + 2];
+        const float cx = 0.5f * (a.x + c.x);
+        const float cy = 0.5f * (a.y + c.y);
+        const float px = (cx * 0.5f + 0.5f) * static_cast<float>(geo.width);
+        const float py = (cy * 0.5f + 0.5f) * static_cast<float>(geo.height);
+        const bool inside = px >= x0 && py >= y0 && px <= x1 && py <= y1;
+        if (inside) {
+            continue;
+        }
+        kept_verts.push_back(geo.verts[i]);
+        kept_verts.push_back(geo.verts[i + 1]);
+        kept_verts.push_back(geo.verts[i + 2]);
+        kept_verts.push_back(geo.verts[i + 3]);
+    }
+    geo.verts.swap(kept_verts);
 }
 
 int gl_scissor(lua_State* state) {
@@ -866,7 +885,7 @@ int gl_clear(lua_State* state) {
     (void)state;
     Geo* geo = target_geo();
     if (g.scissor_on) {
-        erase_scissor_text(*geo);
+        erase_scissor_region(*geo);
         return 0;
     }
     geo->verts.clear();
@@ -1148,6 +1167,7 @@ void gl_begin_draw() {
     g.cb = 1;
     g.ca = 1;
     g.bind = 0;
+    g.texture_missing = false;
     g.recording = 0;
     g.scissor_on = false;
     g.batch.clear();

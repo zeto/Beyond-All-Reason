@@ -46,6 +46,7 @@ void objc_autoreleasePoolPop(void* pool);
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -731,6 +732,17 @@ int run_terrain(const Options& options, const std::string& game_name) {
             renderer.set_marker(0);
             return;
         }
+        // Ground ring only while the commander is selected; depth-tested with terrain
+        // so the unit mesh occludes it. Radius tracks camera distance for ~30px screen size.
+        const bool selected =
+            !bar::selection_snapshot().selected.empty() &&
+            (sim.id.empty() ||
+             std::find(bar::selection_snapshot().selected.begin(), bar::selection_snapshot().selected.end(),
+                       sim.id[0]) != bar::selection_snapshot().selected.end());
+        if (!selected) {
+            renderer.set_marker(0);
+            return;
+        }
         const float grown = distance * 0.012f;
         renderer.set_marker(grown > 28.f ? grown : 28.f);
     };
@@ -804,6 +816,9 @@ int run_terrain(const Options& options, const std::string& game_name) {
         if (locked) {
             layer.contentsScale = 1;
             layer.drawableSize = CGSizeMake(1280, 720);
+        } else if (options.frames > 0) {
+            layer.contentsScale = 2;
+            layer.drawableSize = CGSizeMake(2940, 1846);
         } else {
             layer.contentsScale = boot_scale;
             layer.drawableSize =
@@ -1036,6 +1051,11 @@ int run_terrain(const Options& options, const std::string& game_name) {
             if (locked) {
                 layer.contentsScale = 1;
                 layer.drawableSize = CGSizeMake(1280, 720);
+            } else if (scripted) {
+                // Match interactive Retina fullscreen (~2940x1846) so HUD scale,
+                // minimap marker, and top-bar geometry are exercised at that size.
+                layer.contentsScale = 2;
+                layer.drawableSize = CGSizeMake(2940, 1846);
             } else {
                 layer.contentsScale = scale;
                 layer.drawableSize = CGSizeMake(view.bounds.size.width * scale, view.bounds.size.height * scale);

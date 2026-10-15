@@ -221,12 +221,9 @@ bool selection_get_box(float& x1, float& y1, float& x2, float& y2) {
 }
 
 void selection_append_highlights(HudList& hud) {
-    for (const SelectionMark& mark : g_marks) {
-        if (std::find(g_snap.selected.begin(), g_snap.selected.end(), mark.unit_id) == g_snap.selected.end()) {
-            continue;
-        }
-        push_ring(hud, mark.screen_x, mark.screen_y, mark.radius, 0.2f, 1.f, 0.35f, 0.55f);
-    }
+    // Selection rings are drawn on the terrain (set_marker) so they depth-test under
+    // the unit. Screen-space rings used to slice through the model at any FOV.
+    (void)hud;
 }
 
 bool load_select_events(const std::string& path, std::vector<SelectEvent>& events, std::string& error) {
