@@ -25,6 +25,8 @@
 #include "selection.h"
 #include "build_cmd.h"
 #include "minimap.h"
+#include "hud_status.h"
+#include "unitdef.h"
 #include "move/unit_sim.h"
 #include "smf.h"
 #include "unit_spawn.h"
@@ -468,6 +470,15 @@ int run_terrain(const Options& options, const std::string& game_name) {
             std::cerr << "sim: " << error << "\n";
             return 1;
         }
+        {
+            float hp = 0.f;
+            std::string hp_error;
+            if (bar::load_unit_health(options.game_root, unit.def_name, hp, hp_error) && hp > 0.f) {
+                const size_t at = sim.id.size() - 1;
+                sim.health[at] = hp;
+                sim.max_health[at] = hp;
+            }
+        }
         // The lead unit owns the script host. A later building with speed 0 must not replace it.
         if (sim.id.size() == 1) {
             def_speed = motion.speed_per_sec;
@@ -680,6 +691,7 @@ int run_terrain(const Options& options, const std::string& game_name) {
     std::vector<bar::SelectEvent> select_events;
     std::vector<bar::BuildEvent> build_events;
     std::vector<bar::MinimapEvent> minimap_events;
+    std::vector<bar::HudStatusEvent> hud_status_events;
     if (!options.orders.empty() && !bar::load_orders(options.orders, orders, error)) {
         std::cerr << "orders: " << error << "\n";
         return 1;
@@ -694,6 +706,10 @@ int run_terrain(const Options& options, const std::string& game_name) {
             return 1;
         }
         if (!bar::load_minimap_events(options.input, minimap_events, error)) {
+            std::cerr << "input: " << error << "\n";
+            return 1;
+        }
+        if (!bar::load_hud_status_events(options.input, hud_status_events, error)) {
             std::cerr << "input: " << error << "\n";
             return 1;
         }
@@ -1148,6 +1164,11 @@ int run_terrain(const Options& options, const std::string& game_name) {
                     std::cerr << "input: " << error << "\n";
                     return 1;
                 }
+                bar::hud_status_set_camera(&camera, &pose);
+                if (!bar::apply_hud_status_events(sim, hud_status_events, presented, mesh, error)) {
+                    std::cerr << "input: " << error << "\n";
+                    return 1;
+                }
                 if (!bar::apply_orders(sim, orders, presented, mesh, error)) {
                     // A ship onto land, or a hover onto a cliff, has no legal cell. The unit stays put.
                     if (error == "no ground path") {
@@ -1538,6 +1559,18 @@ int run_terrain(const Options& options, const std::string& game_name) {
             return 1;
         }
         std::cout << "minimap: " << mmap_path.string() << "\n";
+    }
+    {
+        const std::filesystem::path hud_path =
+            options.trace.empty() ? std::filesystem::path("native/oracle/out/m7hud/hud.json")
+                                  : std::filesystem::path(options.trace).parent_path() / "hud.json";
+        std::error_code ec;
+        std::filesystem::create_directories(hud_path.parent_path(), ec);
+        if (!bar::write_hud_status_report(hud_path.string(), presented, error)) {
+            std::cerr << "hud: " << error << "\n";
+            return 1;
+        }
+        std::cout << "hud: " << hud_path.string() << "\n";
     }
     std::cout << "presented " << presented << "\n";
     if (scripted && !sim.x.empty()) {

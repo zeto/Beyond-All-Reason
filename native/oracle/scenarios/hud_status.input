@@ -1,0 +1,5 @@
+# M7 health/range/tooltip: select commander, hover it, apply 50% health via SetUnitHealth-equivalent.
+5 box 400 200 900 520
+20 hover 640 360
+35 damage 0.5
+45 hover 640 360

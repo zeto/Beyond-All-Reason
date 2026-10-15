@@ -303,7 +303,7 @@ bool load_build_events(const std::string& path, std::vector<BuildEvent>& events,
                 error = "place needs def x z";
                 return false;
             }
-        } else if (kind == "box" || kind == "move" || kind == "mmap" || kind == "minimap") {
+        } else if (kind == "box" || kind == "move" || kind == "mmap" || kind == "minimap" || kind == "hover" || kind == "damage") {
             continue;  // selection/minimap events in a shared --input file
         } else {
             error = "unknown build event " + kind;

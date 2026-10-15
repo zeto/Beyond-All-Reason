@@ -44,6 +44,8 @@ struct UnitSim {
     std::vector<char> has_goal;
     // 0 after DestroyUnit. The slot stays so later ids do not move.
     std::vector<char> alive;
+    std::vector<float> health;
+    std::vector<float> max_health;
     std::vector<std::vector<float>> path_x;
     std::vector<std::vector<float>> path_z;
     std::vector<int> path_at;

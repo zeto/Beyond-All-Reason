@@ -75,6 +75,7 @@ add_executable(bar-metal
   ui/selection.cpp
   ui/build_cmd.cpp
   ui/minimap.cpp
+  ui/hud_status.cpp
 )
 target_include_directories(bar-metal PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/rhi/metal4

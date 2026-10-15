@@ -289,6 +289,64 @@ bool load_unit_role(const std::string& game_root, const std::string& def_name, U
     return true;
 }
 
+
+bool load_unit_health(const std::string& game_root, const std::string& def_name, float& health, std::string& error) {
+    lua_State* state = luaL_newstate();
+    if (state == nullptr) {
+        error = "luaL_newstate failed";
+        return false;
+    }
+    luaL_openlibs(state);
+    if (!open_unit_table(state, game_root, def_name, error)) {
+        lua_close(state);
+        return false;
+    }
+    lua_getfield(state, -1, "health");
+    if (!lua_isnumber(state, -1) || !(lua_tonumber(state, -1) > 0.0)) {
+        error = def_name + " has no health";
+        lua_close(state);
+        return false;
+    }
+    health = static_cast<float>(lua_tonumber(state, -1));
+    lua_close(state);
+    return true;
+}
+
+bool load_unit_max_weapon_range(const std::string& game_root, const std::string& def_name, float& range,
+                                std::string& error) {
+    range = 0.f;
+    lua_State* state = luaL_newstate();
+    if (state == nullptr) {
+        error = "luaL_newstate failed";
+        return false;
+    }
+    luaL_openlibs(state);
+    if (!open_unit_table(state, game_root, def_name, error)) {
+        lua_close(state);
+        return false;
+    }
+    // BAR stores ranges under weapondefs = { name = { range = N } }.
+    lua_getfield(state, -1, "weapondefs");
+    if (lua_istable(state, -1)) {
+        lua_pushnil(state);
+        while (lua_next(state, -2) != 0) {
+            if (lua_istable(state, -1)) {
+                lua_getfield(state, -1, "range");
+                if (lua_isnumber(state, -1)) {
+                    const float r = static_cast<float>(lua_tonumber(state, -1));
+                    if (r > range) {
+                        range = r;
+                    }
+                }
+                lua_pop(state, 1);
+            }
+            lua_pop(state, 1);
+        }
+    }
+    lua_close(state);
+    return true;
+}
+
 bool load_unit_wreck(const std::string& game_root, const std::string& def_name, UnitWreck& wreck, std::string& error) {
     wreck = UnitWreck{};
     lua_State* state = luaL_newstate();

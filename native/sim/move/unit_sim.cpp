@@ -296,6 +296,8 @@ bool sim_add_unit(UnitSim& sim, const UnitSpawn& spawn, const UnitMotion& motion
     sim.can_move.push_back(motion.can_move ? 1 : 0);
     sim.has_goal.push_back(0);
     sim.alive.push_back(1);
+    sim.health.push_back(1.f);
+    sim.max_health.push_back(1.f);
     sim.path_x.emplace_back();
     sim.path_z.emplace_back();
     sim.path_at.push_back(0);

@@ -741,6 +741,19 @@ bool spawn_extra_unit(Host& host, const std::string& def_name, float x, float y,
     if (!sim_add_unit(*host.sim, spawn, motion, slope, water, min_water, ground, hover, cruise, error)) {
         return false;
     }
+    {
+        float hp = 0.f;
+        std::string hp_error;
+        const size_t at = host.sim->id.size() - 1;
+        if (load_unit_health(host.game_root, def_name, hp, hp_error) && hp > 0.f) {
+            while (host.sim->health.size() <= at) {
+                host.sim->health.push_back(1.f);
+                host.sim->max_health.push_back(1.f);
+            }
+            host.sim->health[at] = hp;
+            host.sim->max_health[at] = hp;
+        }
+    }
     unit_id = next_id;
     std::cout << "createunit " << def_name << " id " << next_id << " team " << team << " at " << x << " " << y << " "
               << z << "\n";
@@ -830,23 +843,63 @@ int spring_set_no_draw(lua_State* state) {
 }
 
 int spring_get_unit_health(lua_State* state) {
-    (void)luaL_checknumber(state, 1);
-    lua_pushnumber(state, 1);
-    lua_pushnumber(state, 1);
-    lua_pushnumber(state, 0);
-    return 3;
+    Host* host = host_from(state);
+    const int unit = static_cast<int>(luaL_checknumber(state, 1));
+    if (host == nullptr || host->sim == nullptr) {
+        return 0;
+    }
+    for (size_t i = 0; i < host->sim->id.size(); ++i) {
+        // CreateUnit bind currently returns a sim index; selection uses Spring ids.
+        if (host->sim->id[i] != unit && static_cast<int>(i) != unit) {
+            continue;
+        }
+        const float hp = i < host->sim->health.size() ? host->sim->health[i] : 0.f;
+        const float hp_max = i < host->sim->max_health.size() ? host->sim->max_health[i] : 0.f;
+        if (!(hp_max > 0.f)) {
+            continue;
+        }
+        lua_pushnumber(state, hp);
+        lua_pushnumber(state, hp_max);
+        lua_pushnumber(state, 0);
+        lua_pushnumber(state, 0);
+        lua_pushnumber(state, static_cast<double>(hp / hp_max));
+        return 5;
+    }
+    return 0;
 }
 
 int spring_set_unit_health(lua_State* state) {
     Host* host = host_from(state);
     const int unit = static_cast<int>(luaL_checknumber(state, 1));
-    if (host != nullptr && lua_istable(state, 2)) {
+    if (host == nullptr) {
+        return 0;
+    }
+    if (lua_istable(state, 2)) {
         lua_getfield(state, 2, "paralyze");
         const bool paralyzes = lua_isnumber(state, -1) && lua_tonumber(state, -1) > 0;
         lua_pop(state, 1);
         if (paralyzes) {
             if (SpawnAsk* ask = spawn_for(*host, unit)) {
                 ask->paralyze = 1;
+            }
+        }
+        lua_getfield(state, 2, "health");
+        if (lua_isnumber(state, -1) && host->sim != nullptr) {
+            const float hp = static_cast<float>(lua_tonumber(state, -1));
+            for (size_t i = 0; i < host->sim->id.size(); ++i) {
+                if ((host->sim->id[i] == unit || static_cast<int>(i) == unit) && i < host->sim->health.size()) {
+                    host->sim->health[i] = hp;
+                    break;
+                }
+            }
+        }
+        lua_pop(state, 1);
+    } else if (lua_isnumber(state, 2) && host->sim != nullptr) {
+        const float hp = static_cast<float>(lua_tonumber(state, 2));
+        for (size_t i = 0; i < host->sim->id.size(); ++i) {
+            if (host->sim->id[i] == unit && i < host->sim->health.size()) {
+                host->sim->health[i] = hp;
+                break;
             }
         }
     }
@@ -1962,7 +2015,15 @@ void annotate_roles(lua_State* state, Host& host) {
         } else {
             set_num_field(state, "buildSpeed", 0);
         }
-        set_num_field(state, "maxWeaponRange", 0);
+        {
+            float weapon_range = 0.f;
+            std::string range_error;
+            if (load_unit_max_weapon_range(host.game_root, entry.second, weapon_range, range_error)) {
+                set_num_field(state, "maxWeaponRange", weapon_range);
+            } else {
+                set_num_field(state, "maxWeaponRange", 0);
+            }
+        }
         lua_pushstring(state, entry.second.c_str());
         lua_setfield(state, -2, "translatedHumanName");
         lua_pushstring(state, entry.second.c_str());
@@ -2466,6 +2527,23 @@ void credit_building(const AiEconomy& eco, TeamResources& row, const std::string
 }
 
 
+
+void fill_sim_health(Host& host, size_t index) {
+    if (host.sim == nullptr || index >= host.sim->def_name.size()) {
+        return;
+    }
+    while (host.sim->health.size() <= index) {
+        host.sim->health.push_back(1.f);
+        host.sim->max_health.push_back(1.f);
+    }
+    float hp = 0.f;
+    std::string error;
+    if (load_unit_health(host.game_root, host.sim->def_name[index], hp, error) && hp > 0.f) {
+        host.sim->health[index] = hp;
+        host.sim->max_health[index] = hp;
+    }
+}
+
 int alloc_spring_unit_id(Host& host, const UnitSim& sim) {
     int next_id = 1;
     for (int id : sim.id) {
@@ -2515,6 +2593,7 @@ bool add_built_unit(const AiEconomy& eco, const LiveOrder& order, int team, int&
         return false;
     }
     unit_id = next_id;
+    fill_sim_health(host, eco.sim->id.size() - 1);
     def_id = 0;
     if (g_session != nullptr && g_session->host != nullptr) {
         const auto at = g_session->host->def_ids.find(order.def_name);

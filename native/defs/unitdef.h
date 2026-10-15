@@ -153,6 +153,11 @@ struct UnitReclaim {
     float build_distance = 0;
 };
 
+bool load_unit_health(const std::string& game_root, const std::string& def_name, float& health, std::string& error);
+
+bool load_unit_max_weapon_range(const std::string& game_root, const std::string& def_name, float& range,
+                               std::string& error);
+
 bool load_unit_wreck(const std::string& game_root, const std::string& def_name, UnitWreck& wreck, std::string& error);
 
 bool load_unit_reclaim(const std::string& game_root, const std::string& def_name, UnitReclaim& reclaim,

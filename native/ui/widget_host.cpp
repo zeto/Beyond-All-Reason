@@ -4,6 +4,7 @@
 #include "selection.h"
 #include "build_cmd.h"
 #include "minimap.h"
+#include "hud_status.h"
 #include "camera.h"
 #include "gadget_host.h"
 
@@ -205,6 +206,38 @@ int ui_noop(lua_State* state) {
     return 0;
 }
 
+
+
+int ui_get_unit_health(lua_State* state) {
+    const int unit = static_cast<int>(luaL_checknumber(state, 1));
+    if (g_sim == nullptr) {
+        return 0;
+    }
+    for (size_t i = 0; i < g_sim->id.size(); ++i) {
+        if (g_sim->id[i] != unit && static_cast<int>(i) != unit) {
+            continue;
+        }
+        const float hp = i < g_sim->health.size() ? g_sim->health[i] : 0.f;
+        const float hp_max = i < g_sim->max_health.size() ? g_sim->max_health[i] : 0.f;
+        lua_pushnumber(state, hp);
+        lua_pushnumber(state, hp_max);
+        lua_pushnumber(state, 0);
+        lua_pushnumber(state, 0);
+        lua_pushnumber(state, hp_max > 0.f ? static_cast<double>(hp / hp_max) : 0.0);
+        return 5;
+    }
+    return 0;
+}
+
+int ui_trace_screen_ray(lua_State* state) {
+    // Only unit 0 is drawn. If the cursor is near its screen mark, return "unit", id.
+    if (g_sim == nullptr || g_sim->id.empty() || g_camera == nullptr) {
+        return 0;
+    }
+    // Without a live pose here, return ground nil — hover is driven by hud_status events.
+    (void)state;
+    return 0;
+}
 
 int gl_slave_minimap(lua_State* state) {
     const bool slave = lua_toboolean(state, 1) != 0;
@@ -1118,6 +1151,8 @@ os.clock = os.clock or function() return 0 end
     set_spring(state, "GetSelectedUnitsSorted", ui_get_selected_units_sorted);
     set_spring(state, "GetUnitCmdDescs", ui_get_unit_cmd_descs);
     set_spring(state, "GetUnitDefID", ui_get_unit_def_id);
+    set_spring(state, "GetUnitHealth", ui_get_unit_health);
+    set_spring(state, "TraceScreenRay", ui_trace_screen_ray);
     set_spring(state, "GetUnitIsBeingBuilt", ui_get_unit_is_being_built);
     set_spring(state, "SetActiveCommand", ui_set_active_command);
     set_spring(state, "GetCmdDescIndex", ui_get_cmd_desc_index);
@@ -1186,12 +1221,16 @@ end
     const std::string select_path = env.game_root + "/luaui/Widgets/gui_selectionbox.lua";
     const std::string grid_path = env.game_root + "/luaui/Widgets/gui_gridmenu.lua";
     const std::string minimap_path = env.game_root + "/luaui/Widgets/gui_minimap.lua";
+    const std::string tip_path = env.game_root + "/luaui/Widgets/gui_tooltip.lua";
     build_cmd_set_root(env.game_root);
+    hud_status_set_root(env.game_root);
+    hud_status_reset();
     build_cmd_reset();
     if (!load_widget(state, font_path, "bar_ui_font", error) || !load_widget(state, flow_path, "bar_ui_flow", error) ||
         !load_widget(state, top_path, "bar_ui_top", error) ||
         !load_widget(state, select_path, "bar_ui_select", error) ||
         !load_widget(state, grid_path, "bar_ui_grid", error) ||
+        !load_widget(state, tip_path, "bar_ui_tooltip", error) ||
         !load_widget(state, minimap_path, "bar_ui_minimap", error)) {
         return false;
     }
@@ -1210,6 +1249,10 @@ end
     g_grid_draw = true;
     g_grid_update = true;
     if (!call_registry(state, "bar_ui_grid", "Initialize", nullptr, 0, true, error)) {
+        return false;
+    }
+    g_current_widget = "bar_ui_tooltip";
+    if (!call_registry(state, "bar_ui_tooltip", "Initialize", nullptr, 0, true, error)) {
         return false;
     }
     g_current_widget = "bar_ui_minimap";
@@ -1302,6 +1345,9 @@ bool widgets_frame(int frame, std::string& error) {
             return false;
         }
     }
+    g_current_widget = "bar_ui_tooltip";
+    call_registry(state, "bar_ui_tooltip", "DrawScreen", nullptr, 0, true, error);
+    error.clear();
     g_current_widget.clear();
     g_hud = gl_publish();
     selection_append_highlights(g_hud);
@@ -1309,6 +1355,28 @@ bool widgets_frame(int frame, std::string& error) {
         build_append_preview(g_hud, g_view_proj, gl_view_width(), gl_view_height());
     }
     minimap_append_draw(g_hud, g_sim);
+    if (g_sim != nullptr && g_terrain != nullptr) {
+        hud_status_append(g_hud, *g_sim, *g_terrain);
+    }
+    // Drive stock WG.tooltip when we have a hover tip.
+    if (!hud_status_tooltip().empty()) {
+        lua_getglobal(state, "WG");
+        if (lua_istable(state, -1)) {
+            lua_getfield(state, -1, "tooltip");
+            if (lua_istable(state, -1)) {
+                lua_getfield(state, -1, "ShowTooltip");
+                if (lua_isfunction(state, -1)) {
+                    lua_pushstring(state, "bar_hud_unit");
+                    lua_pushstring(state, hud_status_tooltip().c_str());
+                    lua_pcall(state, 2, 0, 0);
+                } else {
+                    lua_pop(state, 1);
+                }
+            }
+            lua_pop(state, 1);
+        }
+        lua_pop(state, 1);
+    }
     return true;
 }
 

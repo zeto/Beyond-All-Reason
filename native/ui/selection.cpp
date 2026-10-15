@@ -262,7 +262,7 @@ bool load_select_events(const std::string& path, std::vector<SelectEvent>& event
                 error = "move line needs x z at " + std::to_string(lineno);
                 return false;
             }
-        } else if (kind == "pick" || kind == "place" || kind == "mmap" || kind == "minimap") {
+        } else if (kind == "pick" || kind == "place" || kind == "mmap" || kind == "minimap" || kind == "hover" || kind == "damage") {
             continue;  // build/minimap events in a shared --input file
         } else {
             error = "unknown select event " + kind;
