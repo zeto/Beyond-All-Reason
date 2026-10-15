@@ -678,17 +678,19 @@ void TerrainRenderer::encode_hud(void* command_buffer, void* target) {
     [encoder setViewport:viewport];
     [encoder setCullMode:MTLCullModeNone];
     [encoder setArgumentTable:impl_->arguments atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+    // Color HUD first (selection, bars, FlowUI chrome), then the map texture on top so
+    // minimap chrome strips cannot sit above the terrain thumb.
+    if (slot->hud_color_count > 0 && slot->hud_color != nil && impl_->hud_color_pipeline != nil) {
+        [impl_->arguments setAddress:slot->hud_color.gpuAddress atIndex:1];
+        [encoder setRenderPipelineState:impl_->hud_color_pipeline];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:slot->hud_color_count];
+    }
     if (slot->hud_minimap_count > 0 && slot->hud_minimap != nil && impl_->hud_text_pipeline != nil &&
         impl_->minimap != nil) {
         [impl_->arguments setTexture:impl_->minimap.gpuResourceID atIndex:0];
         [impl_->arguments setAddress:slot->hud_minimap.gpuAddress atIndex:1];
         [encoder setRenderPipelineState:impl_->hud_text_pipeline];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:slot->hud_minimap_count];
-    }
-    if (slot->hud_color_count > 0 && slot->hud_color != nil && impl_->hud_color_pipeline != nil) {
-        [impl_->arguments setAddress:slot->hud_color.gpuAddress atIndex:1];
-        [encoder setRenderPipelineState:impl_->hud_color_pipeline];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:slot->hud_color_count];
     }
     if (slot->hud_text_count > 0 && slot->hud_text_verts != nil && impl_->hud_text_pipeline != nil &&
         slot->hud_atlas != nil) {
@@ -698,6 +700,7 @@ void TerrainRenderer::encode_hud(void* command_buffer, void* target) {
         [encoder setRenderPipelineState:impl_->hud_text_pipeline];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:slot->hud_text_count];
     }
+
     // The screenshot copy is a blit. It must wait until this pass has stored the bar.
     [encoder barrierAfterStages:MTLStageFragment
             beforeQueueStages:MTLStageBlit

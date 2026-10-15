@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <vector>
 
 namespace bar {
 namespace {
@@ -19,6 +20,15 @@ float g_max_health = 0;
 float g_range = 0;
 int g_hover_unit = 0;
 std::string g_game_root;
+float g_hover_sx = 640.f;
+float g_hover_sy = 360.f;
+float g_bar_left = 0;
+float g_bar_right = 0;
+float g_bar_fill_right = 0;
+float g_bar_bottom = 0;
+float g_bar_top = 0;
+float g_bar_frac = 0;
+std::vector<std::pair<float, float>> g_ring_samples;
 
 float unit_range(const std::string& def_name) {
     float range = 0;
@@ -27,34 +37,10 @@ float unit_range(const std::string& def_name) {
         load_unit_max_weapon_range(g_game_root, def_name, range, error);
     }
     if (range <= 0.f) {
-        // Fall back to UnitDefs table via gadget session name lookup.
         const int def_id = player_unitdef_id(def_name);
         (void)def_id;
     }
     return range;
-}
-
-void push_ring(HudList& hud, float cx, float cy, float radius, float r, float g, float b, float a) {
-    const int segments = 48;
-    const float inner = radius * 0.92f;
-    const float outer = radius;
-    for (int i = 0; i < segments; ++i) {
-        const float a0 = static_cast<float>(i) * 6.2831853f / static_cast<float>(segments);
-        const float a1 = static_cast<float>(i + 1) * 6.2831853f / static_cast<float>(segments);
-        const float c0 = std::cos(a0);
-        const float s0 = std::sin(a0);
-        const float c1 = std::cos(a1);
-        const float s1 = std::sin(a1);
-        HudVertex corners[4] = {
-            {cx + c0 * inner, cy + s0 * inner * 0.55f, r, g, b, a},
-            {cx + c1 * inner, cy + s1 * inner * 0.55f, r, g, b, a},
-            {cx + c1 * outer, cy + s1 * outer * 0.55f, r, g, b, a},
-            {cx + c0 * outer, cy + s0 * outer * 0.55f, r, g, b, a},
-        };
-        for (const HudVertex& vert : corners) {
-            hud.vertices.push_back(vert);
-        }
-    }
 }
 
 void push_bar(HudList& hud, float left, float bottom, float right, float top, float r, float g, float b, float a) {
@@ -69,6 +55,58 @@ void push_bar(HudList& hud, float left, float bottom, float right, float top, fl
     }
 }
 
+// Thin world-space circle on the terrain at radius, projected with the real camera.
+void push_world_range_ring(HudList& hud, const UnitSim& sim, const TerrainMesh& terrain, float range) {
+    g_ring_samples.clear();
+    if (g_camera == nullptr || g_pose == nullptr || !(range > 0.f)) {
+        return;
+    }
+    const int segments = 96;
+    const float line_half = 1.15f;  // ~2.3 px thick band
+    const float lift = 1.5f;
+    const float cx = sim.x[0];
+    const float cz = sim.z[0];
+    float prev_sx = 0;
+    float prev_sy = 0;
+    bool have_prev = false;
+    for (int i = 0; i <= segments; ++i) {
+        const float ang = static_cast<float>(i) * 6.2831853f / static_cast<float>(segments);
+        const float wx = cx + std::cos(ang) * range;
+        const float wz = cz + std::sin(ang) * range;
+        const float wy = terrain_height_at(terrain, wx, wz) + lift;
+        float sx = 0;
+        float sy = 0;
+        if (!world_to_screen(*g_camera, *g_pose, wx, wy, wz, sx, sy)) {
+            have_prev = false;
+            continue;
+        }
+        if (i % 8 == 0) {
+            g_ring_samples.emplace_back(sx, sy);
+        }
+        if (have_prev) {
+            const float dx = sx - prev_sx;
+            const float dy = sy - prev_sy;
+            const float len = std::sqrt(dx * dx + dy * dy);
+            if (len > 0.4f) {
+                const float nx = (-dy / len) * line_half;
+                const float ny = (dx / len) * line_half;
+                HudVertex corners[4] = {
+                    {prev_sx + nx, prev_sy + ny, 1.f, 0.4f, 0.15f, 0.85f},
+                    {sx + nx, sy + ny, 1.f, 0.4f, 0.15f, 0.85f},
+                    {sx - nx, sy - ny, 1.f, 0.4f, 0.15f, 0.85f},
+                    {prev_sx - nx, prev_sy - ny, 1.f, 0.4f, 0.15f, 0.85f},
+                };
+                for (const HudVertex& vert : corners) {
+                    hud.vertices.push_back(vert);
+                }
+            }
+        }
+        prev_sx = sx;
+        prev_sy = sy;
+        have_prev = true;
+    }
+}
+
 }  // namespace
 
 void hud_status_reset() {
@@ -77,6 +115,8 @@ void hud_status_reset() {
     g_max_health = 0;
     g_range = 0;
     g_hover_unit = 0;
+    g_bar_left = g_bar_right = g_bar_fill_right = g_bar_bottom = g_bar_top = g_bar_frac = 0;
+    g_ring_samples.clear();
 }
 
 void hud_status_set_camera(const Camera* camera, const CameraPose* pose) {
@@ -95,10 +135,11 @@ void hud_status_hover(float screen_x, float screen_y, const UnitSim& sim, const 
     g_health = 0;
     g_max_health = 0;
     g_range = 0;
+    g_hover_sx = screen_x;
+    g_hover_sy = screen_y;
     if (g_camera == nullptr || g_pose == nullptr || sim.id.empty()) {
         return;
     }
-    // Only unit 0 is drawn; pick it when the pointer is near its screen position.
     float sx = 0;
     float sy = 0;
     if (!world_to_screen(*g_camera, *g_pose, sim.x[0], sim.y[0] + 20.f, sim.z[0], sx, sy)) {
@@ -114,7 +155,6 @@ void hud_status_hover(float screen_x, float screen_y, const UnitSim& sim, const 
     g_max_health = (0 < sim.max_health.size()) ? sim.max_health[0] : 0.f;
     g_range = unit_range(sim.def_name[0]);
     g_tooltip = sim.def_name[0];
-    // Prefer translated name from UnitDefs when available.
     const int def_id = player_unitdef_id(sim.def_name[0]);
     (void)def_id;
     std::cout << "hud hover unit " << g_hover_unit << " tooltip " << g_tooltip << " hp " << g_health << "/"
@@ -148,7 +188,6 @@ bool hud_status_damage(UnitSim& sim, int spring_unit_id, float health_frac, std:
 }
 
 void hud_status_append(HudList& hud, const UnitSim& sim, const TerrainMesh& terrain) {
-    (void)terrain;
     if (g_camera == nullptr || g_pose == nullptr || sim.id.empty()) {
         return;
     }
@@ -160,42 +199,34 @@ void hud_status_append(HudList& hud, const UnitSim& sim, const TerrainMesh& terr
     const float hp = (0 < sim.health.size()) ? sim.health[0] : 0.f;
     const float hp_max = (0 < sim.max_health.size()) ? sim.max_health[0] : 1.f;
     const float frac = hp_max > 0.f ? std::max(0.f, std::min(1.f, hp / hp_max)) : 0.f;
-    // Health bar (engine overlay; gui_healthbars_gl4 deferred as GL4-heavy).
-    const float bar_w = 42.f;
-    const float bar_h = 5.f;
-    push_bar(hud, sx - bar_w * 0.5f, sy + 18.f, sx + bar_w * 0.5f, sy + 18.f + bar_h, 0.05f, 0.05f, 0.05f, 0.85f);
-    push_bar(hud, sx - bar_w * 0.5f, sy + 18.f, sx - bar_w * 0.5f + bar_w * frac, sy + 18.f + bar_h, 0.15f, 0.9f,
-             0.25f, 0.95f);
-    // Range ring (engine overlay; gui_attackrange_gl4 deferred). Radius in screen px
-    // approximates maxWeaponRange projected from a ground offset sample.
+    // Health bar: readable size above the unit, dark track + green fill at health/maxHealth.
+    const float bar_w = 80.f;
+    const float bar_h = 9.f;
+    const float bar_y = sy + 22.f;
+    const float left = sx - bar_w * 0.5f;
+    const float right = sx + bar_w * 0.5f;
+    const float fill_right = left + bar_w * frac;
+    // Border + track + fill.
+    push_bar(hud, left - 1.f, bar_y - 1.f, right + 1.f, bar_y + bar_h + 1.f, 0.f, 0.f, 0.f, 0.9f);
+    push_bar(hud, left, bar_y, right, bar_y + bar_h, 0.12f, 0.12f, 0.12f, 0.92f);
+    if (frac > 0.01f) {
+        push_bar(hud, left, bar_y, fill_right, bar_y + bar_h, 0.2f, 0.85f, 0.25f, 0.98f);
+    }
+    g_bar_left = left;
+    g_bar_right = right;
+    g_bar_fill_right = fill_right;
+    g_bar_bottom = bar_y;
+    g_bar_top = bar_y + bar_h;
+    g_bar_frac = frac;
+    g_health = hp;
+    g_max_health = hp_max;
+
     float range = unit_range(sim.def_name[0]);
     if (range > 0.f) {
-        float edge_x = 0;
-        float edge_y = 0;
-        if (world_to_screen(*g_camera, *g_pose, sim.x[0] + range, sim.y[0], sim.z[0], edge_x, edge_y)) {
-            const float dx = edge_x - sx;
-            const float dy = edge_y - sy;
-            const float screen_r = std::sqrt(dx * dx + dy * dy);
-            if (screen_r > 4.f && screen_r < 2000.f) {
-                push_ring(hud, sx, sy, screen_r, 1.f, 0.35f, 0.2f, 0.45f);
-            }
-        }
+        push_world_range_ring(hud, sim, terrain, range);
         g_range = range;
     }
-    if (!g_tooltip.empty()) {
-        HudText text;
-        text.text = g_tooltip;
-        text.x = sx;
-        text.y = sy + 28.f;
-        text.size = 14;
-        text.r = 1;
-        text.g = 1;
-        text.b = 1;
-        text.a = 1;
-        text.align = 1;
-        text.outline = true;
-        hud.texts.push_back(std::move(text));
-    }
+    // Stock gui_tooltip renders the unit name near the cursor; no engine HudText label.
 }
 
 bool load_hud_status_events(const std::string& path, std::vector<HudStatusEvent>& events, std::string& error) {
@@ -255,7 +286,18 @@ bool write_hud_status_report(const std::string& path, int frame, std::string& er
         return false;
     }
     out << "{\"f\":" << frame << ",\"hover\":" << g_hover_unit << ",\"tooltip\":\"" << g_tooltip
-        << "\",\"health\":" << g_health << ",\"maxHealth\":" << g_max_health << ",\"range\":" << g_range << "}\n";
+        << "\",\"health\":" << g_health << ",\"maxHealth\":" << g_max_health << ",\"range\":" << g_range
+        << ",\"hoverX\":" << g_hover_sx << ",\"hoverY\":" << g_hover_sy << ",\"barLeft\":" << g_bar_left
+        << ",\"barRight\":" << g_bar_right << ",\"barFillRight\":" << g_bar_fill_right
+        << ",\"barBottom\":" << g_bar_bottom << ",\"barTop\":" << g_bar_top << ",\"barFrac\":" << g_bar_frac
+        << ",\"ringSamples\":[";
+    for (size_t i = 0; i < g_ring_samples.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << "[" << g_ring_samples[i].first << "," << g_ring_samples[i].second << "]";
+    }
+    out << "]}\n";
     if (!out) {
         error = "failed while writing " + path;
         return false;
@@ -277,6 +319,12 @@ float hud_status_range() {
 }
 int hud_status_hover_unit() {
     return g_hover_unit;
+}
+float hud_status_hover_x() {
+    return g_hover_sx;
+}
+float hud_status_hover_y() {
+    return g_hover_sy;
 }
 
 }  // namespace bar

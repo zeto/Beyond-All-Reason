@@ -19,6 +19,7 @@ extern "C" {
 #include <sstream>
 #include <iostream>
 #include <vector>
+#include <cmath>
 
 namespace bar {
 namespace {
@@ -984,6 +985,11 @@ int ui_handler_action_add(lua_State* state) {
     return 0;
 }
 
+int ui_handler_is_modal_active(lua_State* state) {
+    lua_pushboolean(state, 0);
+    return 1;
+}
+
 bool install_widget_handler(lua_State* state, std::string& error) {
     lua_newtable(state);
     lua_pushcfunction(state, ui_handler_update_callin);
@@ -996,6 +1002,8 @@ bool install_widget_handler(lua_State* state, std::string& error) {
     lua_setfield(state, -2, "DisableWidgetRaw");
     lua_pushcfunction(state, ui_handler_register_cmd);
     lua_setfield(state, -2, "RegisterUnitCommand");
+    lua_pushcfunction(state, ui_handler_is_modal_active);
+    lua_setfield(state, -2, "IsModalActive");
     lua_newtable(state);
     lua_pushcfunction(state, ui_handler_action_add);
     lua_setfield(state, -2, "AddAction");
@@ -1067,6 +1075,18 @@ function string.split(val, delimiter)
     n = n + 1
     results[n] = part
   end
+  return results
+end
+function string.lines(s)
+  if s == nil then return {} end
+  s = tostring(s)
+  local results = {}
+  local n = 0
+  for line in string.gmatch(s .. "\n", "(.-)\n") do
+    n = n + 1
+    results[n] = line
+  end
+  if n == 0 then results[1] = s; n = 1 end
   return results
 end
 WG = WG or {}
@@ -1329,7 +1349,9 @@ bool widgets_frame(int frame, std::string& error) {
             return false;
         }
     }
-    if (g_grid_draw) {
+    // Skip empty build-menu chrome unless actively placing (no empty grey panel).
+    const bool draw_grid = g_grid_draw && build_cmd_state().placing;
+    if (draw_grid) {
         if (!call_registry(state, "bar_ui_grid", "DrawScreen", nullptr, 0, false, error)) {
             return false;
         }
@@ -1345,11 +1367,89 @@ bool widgets_frame(int frame, std::string& error) {
             return false;
         }
     }
+    // Drive stock WG.tooltip BEFORE DrawScreen. ShowTooltip must run every frame
+    // (one-shot disabled=true after draw) and twice on first create (stock sets value
+    // only on the update path). Point the mouse at the hover so the tip sits near the cursor.
+    if (!hud_status_tooltip().empty()) {
+        widgets_set_pointer(hud_status_hover_x(), hud_status_hover_y(), false, false, false, false, false, false,
+                            false);
+        auto show_tip = [&]() {
+            lua_getglobal(state, "WG");
+            if (!lua_istable(state, -1)) {
+                lua_pop(state, 1);
+                return;
+            }
+            lua_getfield(state, -1, "tooltip");
+            if (!lua_istable(state, -1)) {
+                lua_pop(state, 2);
+                return;
+            }
+            lua_getfield(state, -1, "ShowTooltip");
+            if (!lua_isfunction(state, -1)) {
+                lua_pop(state, 3);
+                return;
+            }
+            lua_pushstring(state, "bar_hud_unit");
+            lua_pushstring(state, hud_status_tooltip().c_str());
+            lua_pushnumber(state, static_cast<double>(hud_status_hover_x()));
+            lua_pushnumber(state, static_cast<double>(hud_status_hover_y()));
+            if (lua_pcall(state, 4, 0, 0) != 0) {
+                lua_pop(state, 1);
+            }
+            lua_pop(state, 2);  // tooltip, WG
+        };
+        show_tip();
+        show_tip();
+    }
     g_current_widget = "bar_ui_tooltip";
-    call_registry(state, "bar_ui_tooltip", "DrawScreen", nullptr, 0, true, error);
+    {
+        std::string tip_error;
+        if (!call_registry(state, "bar_ui_tooltip", "DrawScreen", nullptr, 0, true, tip_error)) {
+            std::cout << "tooltip DrawScreen: " << tip_error << "\n";
+        }
+    }
     error.clear();
     g_current_widget.clear();
     g_hud = gl_publish();
+    // Drop FlowUI chrome quads that sit on the minimap (drawn after the map texture)
+    // and large empty grey panels mid-left (unhosted/empty build chrome).
+    {
+        const MinimapGeometry& geo = minimap_geometry();
+        const float view_h = static_cast<float>(gl_view_height());
+        const float view_w = static_cast<float>(gl_view_width());
+        const float mmap_l = 0.f;
+        const float mmap_r = static_cast<float>(geo.sx) + 24.f;
+        const float mmap_b = view_h - static_cast<float>(geo.sy) - 24.f;
+        const float mmap_t = view_h;
+        std::vector<HudVertex> kept;
+        kept.reserve(g_hud.vertices.size());
+        for (size_t i = 0; i + 3 < g_hud.vertices.size(); i += 4) {
+            const HudVertex& a = g_hud.vertices[i];
+            const HudVertex& b = g_hud.vertices[i + 1];
+            const HudVertex& c = g_hud.vertices[i + 2];
+            const HudVertex& d = g_hud.vertices[i + 3];
+            const float cx = 0.25f * (a.x + b.x + c.x + d.x);
+            const float cy = 0.25f * (a.y + b.y + c.y + d.y);
+            const float cr = 0.25f * (a.r + b.r + c.r + d.r);
+            const float cg = 0.25f * (a.g + b.g + c.g + d.g);
+            const float cb = 0.25f * (a.b + b.b + c.b + d.b);
+            const float aw = std::fabs(a.x - c.x);
+            const float ah = std::fabs(a.y - c.y);
+            const bool grey = cr < 0.4f && cg < 0.4f && cb < 0.4f && cr + cg + cb < 0.9f;
+            const bool in_mmap = geo.sx > 0 && cx >= mmap_l && cx <= mmap_r && cy >= mmap_b && cy <= mmap_t;
+            // Empty mid-left panel: large grey rect on the left third, not topbar/minimap.
+            const bool empty_panel = grey && aw > 120.f && ah > 120.f && cx < view_w * 0.35f &&
+                                     cy < view_h * 0.75f && cy > view_h * 0.15f;
+            if ((in_mmap && grey) || empty_panel) {
+                continue;
+            }
+            kept.push_back(a);
+            kept.push_back(b);
+            kept.push_back(c);
+            kept.push_back(d);
+        }
+        g_hud.vertices.swap(kept);
+    }
     selection_append_highlights(g_hud);
     if (g_have_view_proj) {
         build_append_preview(g_hud, g_view_proj, gl_view_width(), gl_view_height());
@@ -1357,25 +1457,6 @@ bool widgets_frame(int frame, std::string& error) {
     minimap_append_draw(g_hud, g_sim);
     if (g_sim != nullptr && g_terrain != nullptr) {
         hud_status_append(g_hud, *g_sim, *g_terrain);
-    }
-    // Drive stock WG.tooltip when we have a hover tip.
-    if (!hud_status_tooltip().empty()) {
-        lua_getglobal(state, "WG");
-        if (lua_istable(state, -1)) {
-            lua_getfield(state, -1, "tooltip");
-            if (lua_istable(state, -1)) {
-                lua_getfield(state, -1, "ShowTooltip");
-                if (lua_isfunction(state, -1)) {
-                    lua_pushstring(state, "bar_hud_unit");
-                    lua_pushstring(state, hud_status_tooltip().c_str());
-                    lua_pcall(state, 2, 0, 0);
-                } else {
-                    lua_pop(state, 1);
-                }
-            }
-            lua_pop(state, 1);
-        }
-        lua_pop(state, 1);
     }
     return true;
 }

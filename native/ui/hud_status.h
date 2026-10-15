@@ -44,5 +44,7 @@ float hud_status_health();
 float hud_status_max_health();
 float hud_status_range();
 int hud_status_hover_unit();
+float hud_status_hover_x();
+float hud_status_hover_y();
 
 }  // namespace bar

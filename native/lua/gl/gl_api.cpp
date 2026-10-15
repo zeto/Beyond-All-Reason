@@ -165,13 +165,18 @@ Geo* current_geo() {
 
 int g_target = 0;
 
+Geo g_sink;
+
 Geo* target_geo() {
     if (g_target == 0) {
         return &g.screen;
     }
     const auto at = g.textures.find(g_target);
     if (at == g.textures.end()) {
-        return &g.screen;
+        // Never fall back to the screen: a stale R2T id used to wipe HUD verts via gl.Clear.
+        g_sink.verts.clear();
+        g_sink.texts.clear();
+        return &g_sink;
     }
     return &at->second;
 }
