@@ -797,19 +797,48 @@ bool TerrainRenderer::prepare_hud(const HudList* list, std::string& error) {
             id<MTLTexture> tex = nil;
             const auto decoded = image_get(image);
             if (decoded && decoded->width > 0 && decoded->height > 0) {
+                const bool mips = decoded->mipmaps;
                 MTLTextureDescriptor* desc =
                     [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                        width:decoded->width
                                                                       height:decoded->height
-                                                                   mipmapped:NO];
+                                                                   mipmapped:mips ? YES : NO];
                 desc.usage = MTLTextureUsageShaderRead;
                 desc.storageMode = MTLStorageModeShared;
                 tex = [impl_->device newTextureWithDescriptor:desc];
                 if (tex != nil) {
-                    [tex replaceRegion:MTLRegionMake2D(0, 0, decoded->width, decoded->height)
-                           mipmapLevel:0
-                             withBytes:decoded->rgba.data()
-                           bytesPerRow:static_cast<NSUInteger>(decoded->width) * 4];
+                    // Level 0, then a 2x2 box-filtered chain like glGenerateMipmap.
+                    int w = decoded->width;
+                    int h = decoded->height;
+                    std::vector<uint8_t> level = decoded->rgba;
+                    for (NSUInteger lv = 0; lv < tex.mipmapLevelCount; ++lv) {
+                        [tex replaceRegion:MTLRegionMake2D(0, 0, w, h)
+                               mipmapLevel:lv
+                                 withBytes:level.data()
+                               bytesPerRow:static_cast<NSUInteger>(w) * 4];
+                        if (w == 1 && h == 1) {
+                            break;
+                        }
+                        const int nw = std::max(1, w / 2);
+                        const int nh = std::max(1, h / 2);
+                        std::vector<uint8_t> next(static_cast<size_t>(nw) * nh * 4);
+                        for (int y = 0; y < nh; ++y) {
+                            for (int x = 0; x < nw; ++x) {
+                                const int x0 = std::min(x * 2, w - 1), x1 = std::min(x * 2 + 1, w - 1);
+                                const int y0 = std::min(y * 2, h - 1), y1 = std::min(y * 2 + 1, h - 1);
+                                for (int ch = 0; ch < 4; ++ch) {
+                                    const int sum = level[(static_cast<size_t>(y0) * w + x0) * 4 + ch] +
+                                                    level[(static_cast<size_t>(y0) * w + x1) * 4 + ch] +
+                                                    level[(static_cast<size_t>(y1) * w + x0) * 4 + ch] +
+                                                    level[(static_cast<size_t>(y1) * w + x1) * 4 + ch];
+                                    next[(static_cast<size_t>(y) * nw + x) * 4 + ch] = static_cast<uint8_t>((sum + 2) / 4);
+                                }
+                            }
+                        }
+                        level.swap(next);
+                        w = nw;
+                        h = nh;
+                    }
                     [impl_->residency addAllocation:tex];
                     new_images = true;
                 }

@@ -36,6 +36,63 @@ std::string strip_flags(const std::string& name) {
     return out;
 }
 
+// Recoil NamedTextures option letters that change pixels: 'i' InvertColors, then
+// 'g' MakeGrayScale (luma 0.299/0.587/0.114, times 256/255). Others are sampling hints.
+struct PixelFlags {
+    bool invert = false;
+    bool grey = false;
+    bool nearest = false;
+    bool linear = false;
+};
+
+PixelFlags parse_flags(const std::string& name) {
+    PixelFlags f;
+    if (name.size() < 2 || name[0] != ':') return f;
+    const size_t close = name.find(':', 1);
+    if (close == std::string::npos) return f;
+    for (size_t i = 1; i < close; ++i) {
+        const char c = name[i];
+        if (c == 'r' || c == 't') {
+            // r<w>,<h> / t<r>,<g>,<b>: skip the numbers
+            while (i + 1 < close && (std::isdigit(static_cast<unsigned char>(name[i + 1])) || name[i + 1] == ',' ||
+                                     name[i + 1] == '.')) {
+                ++i;
+            }
+        } else if (c == 'i') {
+            f.invert = true;
+        } else if (c == 'g') {
+            f.grey = true;
+        } else if (c == 'n') {
+            f.nearest = true;
+        } else if (c == 'l') {
+            f.linear = true;
+        }
+    }
+    return f;
+}
+
+// Pixels are premultiplied, so both ops are applied in alpha-scaled form:
+// invert (1-c)*a = a - c*a, and luma is linear in c*a (clamped to a).
+void apply_pixel_flags(DecodedImage& img, PixelFlags f) {
+    if (!f.invert && !f.grey) return;
+    for (size_t i = 0; i + 3 < img.rgba.size(); i += 4) {
+        float r = img.rgba[i], g = img.rgba[i + 1], b = img.rgba[i + 2];
+        const float a = img.rgba[i + 3];
+        if (f.invert) {
+            r = a - r;
+            g = a - g;
+            b = a - b;
+        }
+        if (f.grey) {
+            const float luma = (r * 0.299f + g * 0.587f + b * 0.114f) * (256.f / 255.f);
+            r = g = b = std::min(luma, a);
+        }
+        img.rgba[i] = static_cast<uint8_t>(std::clamp(r, 0.f, 255.f) + 0.5f);
+        img.rgba[i + 1] = static_cast<uint8_t>(std::clamp(g, 0.f, 255.f) + 0.5f);
+        img.rgba[i + 2] = static_cast<uint8_t>(std::clamp(b, 0.f, 255.f) + 0.5f);
+    }
+}
+
 // Case-insensitive path walk under root (the stock tree mixes LuaUI/luaui, ARMCK.DDS/armck.dds).
 std::string find_ci(const std::string& root, const std::string& rel) {
     namespace fs = std::filesystem;
@@ -223,10 +280,13 @@ void image_set_roots(const std::vector<std::string>& roots) {
 int image_acquire(const std::string& spring_name) {
     const std::string rel = strip_flags(spring_name);
     if (rel.empty() || rel[0] == '#' || rel[0] == '%' || rel[0] == '$' || rel[0] == '!') return 0;
+    const PixelFlags flags = parse_flags(spring_name);
+    const std::string key = rel + (flags.invert ? "|i" : "") + (flags.grey ? "|g" : "") +
+                            ((flags.nearest || flags.linear) ? "|nomip" : "");
     std::vector<std::string> roots;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        const auto hit = g_by_name.find(rel);
+        const auto hit = g_by_name.find(key);
         if (hit != g_by_name.end()) return hit->second;
         roots = g_roots;
     }
@@ -253,13 +313,15 @@ int image_acquire(const std::string& spring_name) {
             ok = decode_imageio(bytes, *img);
         }
         if (ok) {
+            apply_pixel_flags(*img, flags);
+            img->mipmaps = !(flags.nearest || flags.linear);
             std::lock_guard<std::mutex> lock(g_mutex);
             g_images.push_back(img);
             id = static_cast<int>(g_images.size()) - 1;
         }
     }
     std::lock_guard<std::mutex> lock(g_mutex);
-    g_by_name[rel] = id;
+    g_by_name[key] = id;
     return id;
 }
 

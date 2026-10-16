@@ -12,6 +12,9 @@ struct DecodedImage {
     int width = 0;
     int height = 0;
     std::vector<uint8_t> rgba;
+    // Recoil builds a mip chain for named textures unless ':n:' or ':l:' asks for
+    // plain nearest/linear sampling (NamedTextures needMipMaps).
+    bool mipmaps = true;
 };
 
 // Search roots for art: the stock game tree, then the BAR content dir. Read-only.

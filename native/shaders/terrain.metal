@@ -177,7 +177,9 @@ fragment float4 hud_color_fs(HudOut in [[stage_in]]) {
 
 // LuaUI images: premultiplied RGBA tinted by gl.Color (GL modulate).
 fragment float4 hud_image_fs(HudOut in [[stage_in]], texture2d<float> image [[texture(0)]]) {
-    constexpr sampler lin(coord::normalized, address::clamp_to_edge, filter::linear);
+    // Recoil named textures keep GL's default REPEAT wrap (only ':c:' clamps, and no
+    // hosted widget asks for it); FlowUI tiles rgbnoise with texcoords past 1.
+    constexpr sampler lin(coord::normalized, address::repeat, filter::linear, mip_filter::linear);
     const float4 c = in.color;
     return image.sample(lin, in.uv) * float4(c.rgb * c.a, c.a);
 }
