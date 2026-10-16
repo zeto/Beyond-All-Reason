@@ -510,6 +510,34 @@ CTLineRef hud_line(CTFontRef font, const std::string& text, float r, float g, fl
         }
         CFRelease(attrs);
     }
+    // Runs hold UTF-8 byte offsets; attributed-string ranges are UTF-16 indices.
+    // Map each byte offset to its UTF-16 index (identity when cfstring_lossy fell
+    // back to a one-byte encoding) and clamp, so multi-byte chat glyphs stay in range.
+    const CFIndex utf16_len = CFStringGetLength(chars);
+    std::vector<CFIndex> u16(plain.size() + 1, 0);
+    if (utf16_len == static_cast<CFIndex>(plain.size())) {
+        for (size_t i = 0; i <= plain.size(); ++i) {
+            u16[i] = static_cast<CFIndex>(i);
+        }
+    } else {
+        CFIndex k = 0;
+        for (size_t i = 0; i < plain.size();) {
+            const unsigned char c = static_cast<unsigned char>(plain[i]);
+            const size_t n = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 1;
+            for (size_t j = 0; j < n && i + j <= plain.size(); ++j) {
+                u16[i + j] = k;
+            }
+            k += n == 4 ? 2 : 1;
+            i += n;
+        }
+        u16[plain.size()] = k;
+    }
+    for (ColorRun& run : runs) {
+        const CFIndex s = std::min(u16[std::min<size_t>(run.start, plain.size())], utf16_len);
+        const CFIndex e = std::min(u16[std::min<size_t>(run.start + run.len, plain.size())], utf16_len);
+        run.start = s;
+        run.len = e - s;
+    }
     CFRelease(chars);
     if (base_color != nullptr) {
         CGColorRelease(base_color);
@@ -520,7 +548,6 @@ CTLineRef hud_line(CTFontRef font, const std::string& text, float r, float g, fl
         }
         return nullptr;
     }
-    // CFString length is UTF-16; plain ASCII/Latin runs match byte length from cfstring_lossy.
     for (const ColorRun& run : runs) {
         if (run.len <= 0) {
             continue;

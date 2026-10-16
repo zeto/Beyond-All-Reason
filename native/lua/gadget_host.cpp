@@ -1522,6 +1522,11 @@ int spring_ensure_unit_def(lua_State* state) {
     lua_setfield(state, -2, "maxWeaponRange");
     lua_pushnumber(state, 0);
     lua_setfield(state, -2, "extractsMetal");
+    // Recoil UnitDef defaults (0) for producer fields the unit file does not set.
+    for (const char* key : {"energyMake", "windGenerator", "tidalGenerator"}) {
+        lua_pushnumber(state, 0);
+        lua_setfield(state, -2, key);
+    }
     lua_pushnumber(state, 0);
     lua_setfield(state, -2, "minWaterDepth");
     lua_pushnumber(state, 0);

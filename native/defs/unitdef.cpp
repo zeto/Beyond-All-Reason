@@ -11,7 +11,44 @@ extern "C" {
 namespace bar {
 namespace {
 
+// Unit files read Spring.GetModOptions() while they load (the assist drones scale
+// workertime by assistdronesbuildpowermultiplier). Recoil hands defs the game's
+// modoptions, filled from modoptions.lua defaults as strings when the startscript
+// sets none; the boot startscript sets none, so the file defaults are the values.
+void install_def_spring(lua_State* state, const std::string& game_root) {
+    static const char* kChunk = R"LUA(
+local root = ...
+local cache
+Spring = Spring or {}
+Spring.GetModOptions = function()
+  if cache then return cache end
+  cache = {}
+  local fn = loadfile(root .. "/modoptions.lua")
+  local ok, list = pcall(fn or function() return {} end)
+  if ok and type(list) == "table" then
+    for _, o in ipairs(list) do
+      if type(o) == "table" and o.key and o.def ~= nil and o.type ~= "section" then
+        local v = o.def
+        if type(v) == "boolean" then v = v and "1" or "0" end
+        cache[string.lower(o.key)] = tostring(v)
+      end
+    end
+  end
+  return cache
+end
+)LUA";
+    if (luaL_loadstring(state, kChunk) != 0) {
+        lua_pop(state, 1);
+        return;
+    }
+    lua_pushlstring(state, game_root.data(), game_root.size());
+    if (lua_pcall(state, 1, 0, 0) != 0) {
+        lua_pop(state, 1);
+    }
+}
+
 bool open_unit_table(lua_State* state, const std::string& game_root, const std::string& def_name, std::string& error) {
+    install_def_spring(state, game_root);
     const std::filesystem::path root = std::filesystem::path(game_root) / "units";
     const std::filesystem::path direct = root / (def_name + ".lua");
     std::filesystem::path path;

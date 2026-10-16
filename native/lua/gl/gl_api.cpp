@@ -222,7 +222,13 @@ void flush_batch() {
     g.batch.clear();
 }
 
-void replay_texture(int id, float x1, float y1, float x2, float y2, float r, float gch, float b, float a) {
+// Replays a render-to-texture's recorded geometry into a screen rect. st is the
+// TexRect texcoord window (s1,t1,s2,t2): only that part of the texture lands in the
+// rect (gui_chat blits the bottom slice of its history texture), and anything the
+// window leaves out is clipped. Orientation is kept as recorded: R2tHelper blits
+// with flipped t and draws upright, so the window is taken as [min,max] per axis.
+void replay_texture(int id, float x1, float y1, float x2, float y2, float r, float gch, float b, float a,
+                    const float st[4]) {
     const auto at = g.textures.find(id);
     if (at == g.textures.end()) {
         return;
@@ -234,21 +240,54 @@ void replay_texture(int id, float x1, float y1, float x2, float y2, float r, flo
     const float top = std::max(y1, y2);
     const float width = right - left;
     const float height = top - bottom;
-    auto map_x = [&](float ndc) { return (ndc * 0.5f + 0.5f) * width + left; };
-    auto map_y = [&](float ndc) { return (ndc * 0.5f + 0.5f) * height + bottom; };
+    const float s_lo = std::min(st[0], st[2]);
+    const float s_hi = std::max(st[0], st[2]);
+    const float t_lo = std::min(st[1], st[3]);
+    const float t_hi = std::max(st[1], st[3]);
+    const float s_span = s_hi - s_lo > 1e-6f ? s_hi - s_lo : 1.f;
+    const float t_span = t_hi - t_lo > 1e-6f ? t_hi - t_lo : 1.f;
+    auto map_x = [&](float ndc) { return ((ndc * 0.5f + 0.5f) - s_lo) / s_span * width + left; };
+    auto map_y = [&](float ndc) { return ((ndc * 0.5f + 0.5f) - t_lo) / t_span * height + bottom; };
+    const bool windowed = s_lo > 1e-4f || s_hi < 1.f - 1e-4f || t_lo > 1e-4f || t_hi < 1.f - 1e-4f;
+    // Text glyph sizes are recorded in texture NDC; the window scales them with height.
+    const float text_scale = height / t_span;
     Geo* geo = target_geo();
     for (size_t i = 0; i + 3 < src.verts.size(); i += 4) {
         Corner corners[4];
+        float min_x = 1e30f, max_x = -1e30f, min_y = 1e30f, max_y = -1e30f;
+        for (int k = 0; k < 4; ++k) {
+            const HudVertex& vert = src.verts[i + static_cast<size_t>(k)];
+            const float mx = map_x(vert.x);
+            const float my = map_y(vert.y);
+            min_x = std::min(min_x, mx); max_x = std::max(max_x, mx);
+            min_y = std::min(min_y, my); max_y = std::max(max_y, my);
+        }
+        if (windowed && (max_x <= left || min_x >= right || max_y <= bottom || min_y >= top)) {
+            continue;
+        }
         for (int k = 0; k < 4; ++k) {
             const HudVertex& vert = src.verts[i + static_cast<size_t>(k)];
             corners[k].x = map_x(vert.x);
             corners[k].y = map_y(vert.y);
+            corners[k].u = vert.u;
+            corners[k].v = vert.v;
+            if (windowed) {
+                const float cx = std::clamp(corners[k].x, left, right);
+                const float cy = std::clamp(corners[k].y, bottom, top);
+                // Keep an image's texcoords on the clipped edge (axis-aligned quads).
+                if (vert.image > 0 && max_x > min_x && max_y > min_y) {
+                    const HudVertex& opp = src.verts[i + static_cast<size_t>((k + 2) % 4)];
+                    const float ox = map_x(opp.x), oy = map_y(opp.y);
+                    if (ox != corners[k].x) corners[k].u = vert.u + (opp.u - vert.u) * (cx - corners[k].x) / (ox - corners[k].x);
+                    if (oy != corners[k].y) corners[k].v = vert.v + (opp.v - vert.v) * (cy - corners[k].y) / (oy - corners[k].y);
+                }
+                corners[k].x = cx;
+                corners[k].y = cy;
+            }
             corners[k].r = vert.r * r;
             corners[k].g = vert.g * gch;
             corners[k].b = vert.b * b;
             corners[k].a = vert.a * a;
-            corners[k].u = vert.u;
-            corners[k].v = vert.v;
             corners[k].img = vert.image;
         }
         push_quad(corners[0], corners[1], corners[2], corners[3]);
@@ -257,7 +296,10 @@ void replay_texture(int id, float x1, float y1, float x2, float y2, float r, flo
         HudText mapped = text;
         mapped.x = map_x(text.x);
         mapped.y = map_y(text.y);
-        mapped.size = text.size * height * 0.5f;
+        if (windowed && (mapped.y < bottom || mapped.y > top)) {
+            continue;
+        }
+        mapped.size = text.size * text_scale * 0.5f;
         mapped.r *= r;
         mapped.g *= gch;
         mapped.b *= b;
@@ -400,7 +442,7 @@ void play(const Op& op) {
             if (op.img > 0) {
                 image_rect(op.img, op.f[0], op.f[1], op.f[2], op.f[3], op.st, op.f[4], op.f[5], op.f[6], op.f[7]);
             } else if (op.i > 0) {
-                replay_texture(op.i, op.f[0], op.f[1], op.f[2], op.f[3], op.f[4], op.f[5], op.f[6], op.f[7]);
+                replay_texture(op.i, op.f[0], op.f[1], op.f[2], op.f[3], op.f[4], op.f[5], op.f[6], op.f[7], op.st);
             }
             // i==0: skip (see note_texrect); do not invent a solid rotating square.
             break;
@@ -536,7 +578,7 @@ void note_texrect(float x1, float y1, float x2, float y2, const float st[4]) {
         return;
     }
     if (g.bind > 0) {
-        replay_texture(g.bind, x1, y1, x2, y2, g.cr, g.cg, g.cb, g.ca);
+        replay_texture(g.bind, x1, y1, x2, y2, g.cr, g.cg, g.cb, g.ca, st);
     }
     // Unbound TexRect used to fill a solid color quad. That turned the wind-blades
     // icon (Texture(":n:...png") is not a numeric bind) into a rotating white square.

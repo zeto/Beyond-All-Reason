@@ -22,6 +22,7 @@ extern "C" {
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <chrono>
 
 namespace bar {
 namespace {
@@ -64,6 +65,26 @@ bool g_order_draw = true;
 bool g_order_update = true;
 bool g_info_draw = false;
 bool g_info_update = false;
+// Stock widgets hosted through one generic path: load, Initialize, ViewResize,
+// Update, DrawScreen, with UpdateCallIn/RemoveCallIn honoured per widget.
+struct ExtraWidget {
+    const char* key;
+    const char* file;
+    bool loaded = false;
+    bool draw = true;
+    bool update = true;
+};
+ExtraWidget g_extra[] = {
+    {"bar_ui_topbuttons", "gui_top_bar_buttons.lua"},
+    {"bar_ui_idle", "gui_idle_builders.lua"},
+    {"bar_ui_chat", "gui_chat.lua"},
+    {"bar_ui_messages", "gui_messages.lua"},
+    {"bar_ui_notifications", "snd_notifications.lua"},
+};
+// Recoil sends every Spring.Echo line to the console, and widgets see it through
+// widget:AddConsoleLine(line, priority). Lines queue here and are delivered each frame.
+std::vector<std::string> g_console_lines;
+ExtraWidget* extra_current();
 bool g_buildmenu_draw = false;
 bool g_buildmenu_update = false;
 
@@ -421,17 +442,32 @@ bool assign_include(lua_State* state, const char* global_name, const char* field
 }
 
 bool load_widget(lua_State* state, const std::string& path, const char* key, std::string& error) {
-    lua_newtable(state);
-    lua_setglobal(state, "widget");
+    // Recoil's widget handler runs each widget chunk in its own environment whose
+    // reads fall through to the shared globals; undeclared globals a widget assigns
+    // (gui_top_bar's and gui_idle_builders' uiTex, for one) stay private to it.
     if (luaL_loadfile(state, path.c_str()) != 0) {
         error = lua_tostring(state, -1) != nullptr ? lua_tostring(state, -1) : "widget load failed";
         lua_pop(state, 1);
         return false;
     }
+    lua_newtable(state);  // env
+    lua_newtable(state);  // widget
+    lua_pushvalue(state, -1);
+    lua_setfield(state, -3, "widget");
+    lua_setglobal(state, "widget");  // hosts that read the global widget still see it
+    lua_newtable(state);             // env metatable
+    lua_pushvalue(state, LUA_GLOBALSINDEX);
+    lua_setfield(state, -2, "__index");
+    lua_setmetatable(state, -2);
+    lua_pushvalue(state, -1);
+    lua_setfield(state, LUA_REGISTRYINDEX, (std::string(key) + "_env").c_str());
+    lua_setfenv(state, -2);
     if (!pcall_keep(state, 0, 0, error)) {
         return false;
     }
-    lua_getglobal(state, "widget");
+    lua_getfield(state, LUA_REGISTRYINDEX, (std::string(key) + "_env").c_str());
+    lua_getfield(state, -1, "widget");
+    lua_remove(state, -2);
     if (!lua_istable(state, -1)) {
         lua_pop(state, 1);
         error = path + " did not leave a widget table";
@@ -439,6 +475,15 @@ bool load_widget(lua_State* state, const std::string& path, const char* key, std
     }
     lua_setfield(state, LUA_REGISTRYINDEX, key);
     return true;
+}
+
+ExtraWidget* extra_current() {
+    for (ExtraWidget& w : g_extra) {
+        if (g_current_widget == w.key) {
+            return &w;
+        }
+    }
+    return nullptr;
 }
 
 bool call_registry(lua_State* state, const char* key, const char* method, const double* args, int nargs, bool required,
@@ -624,6 +669,12 @@ int ui_handler_update_callin(lua_State* state) {
         } else if (callin == "Update") {
             g_info_update = true;
         }
+    } else if (ExtraWidget* w = extra_current()) {
+        if (callin == "DrawScreen") {
+            w->draw = true;
+        } else if (callin == "Update") {
+            w->update = true;
+        }
     }
     return 0;
 }
@@ -668,6 +719,12 @@ int ui_handler_remove_callin(lua_State* state) {
         } else if (callin == "Update") {
             g_info_update = false;
         }
+    } else if (ExtraWidget* w = extra_current()) {
+        if (callin == "DrawScreen") {
+            w->draw = false;
+        } else if (callin == "Update") {
+            w->update = false;
+        }
     }
     return 0;
 }
@@ -675,6 +732,36 @@ int ui_handler_remove_callin(lua_State* state) {
 
 int ui_get_game_frame(lua_State* state) {
     lua_pushinteger(state, g_frame);
+    return 1;
+}
+
+// The boot startscript has one human player, [player0], so the local player is 0.
+// bar-metal boots a live game from a startscript; it has no demo playback.
+int ui_is_replay(lua_State* state) {
+    lua_pushboolean(state, 0);
+    return 1;
+}
+
+int ui_local_player(lua_State* state) {
+    lua_pushinteger(state, 0);
+    return 1;
+}
+
+// Spring.GetTimer returns an opaque timer; Recoil packs microseconds into a light
+// userdata. DiffTimers(a, b[, inMilliseconds]) returns seconds (or ms) between them.
+int ui_get_timer(lua_State* state) {
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    lua_pushlightuserdata(state, reinterpret_cast<void*>(static_cast<uintptr_t>(us)));
+    return 1;
+}
+
+int ui_diff_timers(lua_State* state) {
+    const auto a = reinterpret_cast<uintptr_t>(lua_touserdata(state, 1));
+    const auto b = reinterpret_cast<uintptr_t>(lua_touserdata(state, 2));
+    const double us = static_cast<double>(static_cast<int64_t>(a - b));
+    lua_pushnumber(state, lua_toboolean(state, 3) ? us / 1000.0 : us / 1e6);
     return 1;
 }
 
@@ -1243,6 +1330,13 @@ int ui_play_sound(lua_State* state) {
     return 0;
 }
 
+// bar-metal has no audio backend yet (PlaySoundFile above plays nothing), so no
+// sound items get registered; Recoil returns false when a sound def did not load.
+int ui_load_sound_def(lua_State* state) {
+    lua_pushboolean(state, 0);
+    return 1;
+}
+
 int ui_give_order(lua_State* state) {
     // Mirror gadget GiveOrderToUnit for build placements from the UI state.
     const int unit = static_cast<int>(luaL_checknumber(state, 1));
@@ -1277,12 +1371,29 @@ int ui_give_order(lua_State* state) {
     return 0;
 }
 
+// Spring.Echo stringifies each argument with tostring and joins them with ", ".
+std::string echo_arg(lua_State* state, int index) {
+    lua_getglobal(state, "tostring");
+    lua_pushvalue(state, index);
+    lua_call(state, 1, 1);
+    size_t len = 0;
+    const char* s = lua_tolstring(state, -1, &len);
+    std::string out = s != nullptr ? std::string(s, len) : "nil";
+    lua_pop(state, 1);
+    return out;
+}
+
 int ui_echo(lua_State* state) {
     const int top = lua_gettop(state);
+    std::string line;
     for (int i = 1; i <= top; ++i) {
-        const char* text = lua_tostring(state, i);
-        std::cout << (text != nullptr ? text : "(nil)") << (i == top ? "\n" : " ");
+        line += echo_arg(state, i);
+        if (i != top) {
+            line += ", ";
+        }
     }
+    std::cout << line << "\n";
+    g_console_lines.push_back(std::move(line));
     return 0;
 }
 
@@ -1788,6 +1899,16 @@ os.clock = os.clock or function() return 0 end
     set_spring(state, "GetUnitResources", ui_get_unit_resources);
     set_spring(state, "GetUnitTeam", ui_get_unit_team);
     set_spring(state, "GetPlayerInfo", ui_get_player_info);
+    set_spring(state, "GetLocalPlayerID", ui_local_player);
+    set_spring(state, "IsReplay", ui_is_replay);
+    set_spring(state, "LoadSoundDef", ui_load_sound_def);
+    set_spring(state, "GetMyPlayerID", ui_local_player);
+    set_spring(state, "GetTimer", ui_get_timer);
+    // Cocoa delivers key text to the view at all times; there is no SDL text-input
+    // mode to switch, so start/stop have nothing to toggle.
+    set_spring(state, "SDLStartTextInput", ui_noop);
+    set_spring(state, "SDLStopTextInput", ui_noop);
+    set_spring(state, "DiffTimers", ui_diff_timers);
     set_spring(state, "GetAIInfo", ui_get_ai_info);
     set_spring(state, "GetAllFeatures", ui_get_all_features);
     set_spring(state, "GetFeaturesInSphere", ui_get_features_in_sphere);
@@ -2004,7 +2125,8 @@ end
     g_info_draw = true;
     g_info_update = true;
     // Re-pad UnitDefs: earlier widgets may have created stubs via UnitDefNames __index.
-    if (!run_chunk(state, R"LUA(
+    // The pad is kept as a function so later widget loads can re-run it.
+    if (!run_chunk(state, "function _bar_pad_unitdefs()\n" R"LUA(
 for id, ud in pairs(UnitDefs) do
   if type(ud) == "table" then
     local num = {
@@ -2015,12 +2137,15 @@ for id, ud in pairs(UnitDefs) do
       "energyStorage","metalStorage","extractsMetal","armorType",
       "cloakCost","cloakCostMoving","transportMass","transportSize",
       "transportCapacity","buildDistance",
+      -- Recoil UnitDef defaults for units with no such key; live defs carry
+      -- their file values from annotate_roles before this pad runs.
+      "energyMake","windGenerator","tidalGenerator",
     }
     for _, k in ipairs(num) do if ud[k] == nil then ud[k] = 0 end end
     local bools = {
       "isBuilder","isFactory","isAirUnit","isTransport","stealth",
       "canCloak","canStockpile","needGeo","canAssist","canReclaim",
-      "canRepair","canRestore","canResurrect","canCapture",
+      "canRepair","canRestore","canResurrect","canCapture","isBuilding",
     }
     for _, k in ipairs(bools) do if ud[k] == nil then ud[k] = false end end
     if ud.buildOptions == nil then ud.buildOptions = {} end
@@ -2032,6 +2157,11 @@ for id, ud in pairs(UnitDefs) do
     if ud.buildPic == nil then ud.buildPic = ud.buildpicname end
   end
 end
+)LUA" "\nend\n", error)) {
+        return false;
+    }
+    if (!run_chunk(state, R"LUA(
+_bar_pad_unitdefs()
 -- luaui/setupdefs.lua runs this before any widget loads.
 VFS.Include("luaui/i18nhelpers.lua").RefreshDefs()
 )LUA",
@@ -2040,6 +2170,21 @@ VFS.Include("luaui/i18nhelpers.lua").RefreshDefs()
     }
     if (!call_registry(state, "bar_ui_info", "Initialize", nullptr, 0, true, error)) {
         return false;
+    }
+    for (ExtraWidget& w : g_extra) {
+        std::string werr;
+        if (!run_chunk(state, "_bar_pad_unitdefs()", werr)) {
+            std::cout << "unitdef pad: " << werr << "\n";
+        }
+        g_current_widget = w.key;
+        const std::string path = env.game_root + "/luaui/Widgets/" + w.file;
+        if (!load_widget(state, path, w.key, werr) ||
+            !call_registry(state, w.key, "Initialize", nullptr, 0, false, werr)) {
+            std::cout << "widget " << w.file << " failed: " << werr << "\n";
+            continue;
+        }
+        w.loaded = true;
+        call_registry(state, w.key, "ViewResize", nullptr, 0, false, werr);
     }
     g_current_widget.clear();
 
@@ -2105,6 +2250,13 @@ bool widgets_frame(int frame, std::string& error) {
         g_current_widget = "bar_ui_info";
         call_registry(state, "bar_ui_info", "ViewResize", nullptr, 0, false, error);
         error.clear();
+        for (ExtraWidget& w : g_extra) {
+            if (w.loaded) {
+                g_current_widget = w.key;
+                call_registry(state, w.key, "ViewResize", nullptr, 0, false, error);
+                error.clear();
+            }
+        }
         g_current_widget.clear();
         g_applied_w = g_next_w;
         g_applied_h = g_next_h;
@@ -2193,6 +2345,46 @@ bool widgets_frame(int frame, std::string& error) {
             std::cout << "info DrawScreen: " << error << "\n";
             error.clear();
         }
+    }
+    if (!g_console_lines.empty()) {
+        std::vector<std::string> lines;
+        lines.swap(g_console_lines);
+        for (const ExtraWidget& w : g_extra) {
+            if (!w.loaded) {
+                continue;
+            }
+            g_current_widget = w.key;
+            for (const std::string& line : lines) {
+                lua_getfield(state, LUA_REGISTRYINDEX, w.key);
+                lua_getfield(state, -1, "AddConsoleLine");
+                if (!lua_isfunction(state, -1)) {
+                    lua_pop(state, 2);
+                    break;
+                }
+                lua_pushvalue(state, -2);
+                lua_pushlstring(state, line.data(), line.size());
+                lua_pushinteger(state, 0);  // LOG.INFO priority, as Spring.Echo uses
+                lua_remove(state, -5);
+                if (!pcall_keep(state, 3, 0, error)) {
+                    std::cout << w.file << " AddConsoleLine: " << error << "\n";
+                    error.clear();
+                }
+            }
+        }
+    }
+    for (ExtraWidget& w : g_extra) {
+        if (!w.loaded) {
+            continue;
+        }
+        g_current_widget = w.key;
+        if (w.update && !call_registry(state, w.key, "Update", &step, 1, false, error)) {
+            std::cout << w.file << " Update: " << error << "\n";
+        }
+        error.clear();
+        if (w.draw && !call_registry(state, w.key, "DrawScreen", nullptr, 0, false, error)) {
+            std::cout << w.file << " DrawScreen: " << error << "\n";
+        }
+        error.clear();
     }
     // Drive stock WG.tooltip BEFORE DrawScreen. ShowTooltip must run every frame
     // (one-shot disabled=true after draw) and twice on first create (stock sets value
