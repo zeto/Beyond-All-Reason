@@ -49,6 +49,8 @@ else
 	local build_def = Spring.GetModOptions().barmetal_builddef or ""
 	local do_select = (Spring.GetModOptions().barmetal_select or "1") ~= "0"
 	local shot_frame = tonumber(Spring.GetModOptions().barmetal_shotframe) or 60
+	-- barmetal_los=0 turns BAR's LOS map view off (bar-metal draws no LOS shading).
+	local los_off = (Spring.GetModOptions().barmetal_los or "1") == "0"
 	local shot_done = false
 
 	local function commander()
@@ -78,6 +80,9 @@ else
 
 	function gadget:Update()
 		local f = Spring.GetGameFrame() or 0
+		if los_off and Spring.GetMapDrawMode and Spring.GetMapDrawMode() == "los" then
+			pcall(Spring.SendCommands, "togglelos")
+		end
 		local id = commander()
 		if id then
 			apply_hud(id)

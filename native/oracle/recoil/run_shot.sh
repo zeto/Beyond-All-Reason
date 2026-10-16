@@ -1,6 +1,8 @@
 #!/bin/bash
 # Headed Recoil HUD bookmark screenshot for M7 FLIP.
-# Usage: run_shot.sh --shot NAME [--frames N] [--damage FRAC] [--builddef DEF]
+# Usage: run_shot.sh --shot NAME [--frames N] [--damage FRAC] [--builddef DEF] [--select 0|1]
+#        [--cam x,y,z,distance,tilt,yaw]  (fixed bookmark camera instead of the commander lock)
+#        [--los 0|1]  (0 turns BAR's LOS map view off)
 # Writes PNG to /tmp/bar-oracle/screenshots/NAME.png (oracle write-dir only).
 set -euo pipefail
 
@@ -11,6 +13,8 @@ BUILDDEF=""
 SELECT="1"
 SHOTFRAME="60"
 CAMMODE="spring_orbit"
+CAM=""
+LOS="1"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -21,6 +25,8 @@ while [[ $# -gt 0 ]]; do
     --select) SELECT="${2:?}"; shift 2 ;;
     --shotframe) SHOTFRAME="${2:?}"; shift 2 ;;
     --cammode) CAMMODE="${2:?}"; shift 2 ;;
+    --cam) CAM="${2:?}"; shift 2 ;;
+    --los) LOS="${2:?}"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -116,6 +122,8 @@ cat > "$ROOT/boot.txt" <<BOOTEOF
 		barmetal_select=${SELECT};
 		barmetal_shotframe=${SHOTFRAME};
 		barmetal_cammode=${CAMMODE};
+		barmetal_cam=${CAM};
+		barmetal_los=${LOS};
 	}
 	[ALLYTEAM0]
 	{

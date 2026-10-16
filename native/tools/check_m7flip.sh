@@ -34,6 +34,7 @@ echo "m7_flip bar = $BAR_FLIP"
 # --- bar-metal captures (reuse lock-camera inputs from widget checks) ---
 capture_bar() {
   local id="$1" input="$2" frames="$3"
+  shift 3
   local dest="$OUT/bar/${id}.ppm"
   echo "bar-metal shot $id ..."
   if pgrep -x bar-metal >/dev/null || pgrep -x spring >/dev/null; then
@@ -47,6 +48,7 @@ capture_bar() {
     --lock-camera \
     --input "$input" \
     --screenshot "$dest" \
+    "$@" \
     > "$OUT/bar/${id}.log" 2>&1 || {
       echo "bar-metal failed for $id; see $OUT/bar/${id}.log" >&2
       exit 1
@@ -70,6 +72,9 @@ if [[ -f "$ROOT/native/oracle/scenarios/window_hud.input" ]]; then
 else
   capture_bar widgets "$ROOT/native/oracle/scenarios/select_commander.input" 45
 fi
+# water: fixed "shore" bookmark camera (oracle/cameras.json), no selection.
+capture_bar water "$ROOT/native/oracle/scenarios/water.input" 45 \
+  --fixed-camera "$ROOT/native/oracle/cameras.json#shore"
 
 # --- headed Recoil reference captures ---
 capture_ref() {
@@ -107,6 +112,9 @@ capture_ref build   --frames 270 --shotframe 210 --builddef armmex || true
 capture_ref minimap --frames 260 --shotframe 200 || true
 capture_ref hud     --frames 270 --shotframe 210 --damage 0.5 || true
 capture_ref widgets --frames 260 --shotframe 200 || true
+# The shore is ~2000 elmos outside the commander's sight; BAR's LOS view would darken all of it,
+# and bar-metal draws no LOS shading, so this ref turns the LOS view off.
+capture_ref water   --frames 260 --shotframe 200 --select 0 --los 0 --cam "5824,0,4032,1800,0.9,0.8" || true
 
 # --- FLIP score ---
 "$FLIP_PY" - "$OUT" "$BAR_FLIP" "$BOOKMARKS" <<'PY'

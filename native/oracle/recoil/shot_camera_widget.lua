@@ -65,10 +65,25 @@ local function want(id)
 	return {tx = tx, ty = ty, tz = tz, ex = ex, ey = ey, ez = ez}
 end
 
+-- barmetal_cam "x,y,z,distance,tilt,yaw": a fixed bookmark camera (bar-metal --fixed-camera),
+-- posed like native/map/camera.cpp camera_pose (eye height cos(tilt)*distance above y=0).
+local function fixed_cam()
+	local spec = (Spring.GetModOptions() or {}).barmetal_cam or ""
+	if spec == "" then return nil end
+	local v = {}
+	for n in spec:gmatch("[^,]+") do v[#v + 1] = tonumber(n) end
+	if #v ~= 6 then return nil end
+	local tx, ty, tz, dist, tilt, yaw = v[1], v[2], v[3], v[4], v[5], v[6]
+	local horizontal = math.sin(tilt) * dist
+	return {tx = tx, ty = ty, tz = tz,
+		ex = tx - math.sin(yaw) * horizontal, ey = math.cos(tilt) * dist, ez = tz - math.cos(yaw) * horizontal}
+end
+
 local function lock()
+	local fixed = fixed_cam()
 	local id = commander()
-	if not id then return end
-	local p = want(id)
+	if not id and not fixed then return end
+	local p = fixed or want(id)
 	if not p then return end
 
 	-- camera.cpp eye.y is absolute (cos(tilt)*dist + lift), not target-relative, while
@@ -84,6 +99,9 @@ local function lock()
 	-- and rotation directly, so it can hold camera.cpp's eye and look-at exactly.
 	local len = dist
 	local fx, fy, fz = -vx / len, -vy / len, -vz / len
+	-- CCamera::GetFwdFromRot: fwd = (sin rx sin ry, cos rx, -sin rx cos ry). The commander lock
+	-- (yaw pi) gives ry 0; a fixed bookmark needs its own heading or FPS faces north.
+	local ry = fixed and math.atan2(fx, -fz) or SPRING_RY
 	Spring.SetCameraState({
 		name = "fps",
 		mode = 0,
@@ -94,14 +112,16 @@ local function lock()
 		dy = fy,
 		dz = fz,
 		rx = rx,
-		ry = SPRING_RY,
+		ry = ry,
 		rz = 0,
 		oldHeight = p.ey,
 		fov = 45,
 	}, 0)
 	p.fx, p.fy, p.fz = fx, fy, fz
 
-	pcall(Spring.SelectUnitArray, {id})
+	if not fixed then
+		pcall(Spring.SelectUnitArray, {id})
+	end
 
 	local f = Spring.GetGameFrame() or 0
 	if last_logged < 0 and f >= 20 then

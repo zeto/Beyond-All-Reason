@@ -41,6 +41,13 @@
       "layer": 5,
       "desc": "Remaining default-on widgets (top bar chrome)",
       "hud": {"select": true, "default_widgets": true}
+    },
+    {
+      "id": "water",
+      "layer": 6,
+      "desc": "BasicWater plane and shoreline from the cameras.json shore bookmark (ref: LOS view off)",
+      "camera": {"bookmark": "shore", "x": 5824, "y": 0, "z": 4032, "distance": 1800, "tilt": 0.9, "yaw": 0.8},
+      "hud": {"select": false}
     }
   ]
 }
