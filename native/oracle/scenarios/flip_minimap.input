@@ -1,0 +1,3 @@
+# FLIP bookmark input for the "minimap" shot. The Recoil ref only selects the commander;
+# no minimap move order, so the commander keeps its spawn facing like the ref.
+5 box 400 200 900 520

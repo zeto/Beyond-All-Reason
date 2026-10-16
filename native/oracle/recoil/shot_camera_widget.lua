@@ -150,6 +150,12 @@ function widget:Initialize()
 		}) do
 			pcall(widgetHandler.DisableWidget, widgetHandler, n)
 		end
+		-- Diagnostic only (run_shot.sh --disable-widget): isolate one widget's effect on the image.
+		local extra = (Spring.GetModOptions() or {}).barmetal_disable_widget or ""
+		if extra ~= "" then
+			pcall(widgetHandler.DisableWidget, widgetHandler, extra)
+			camlog("oracle_cam_widget: disabled widget " .. extra)
+		end
 	end
 	camlog(string.format("oracle_cam_widget: spring rx=%.3f ry=%.3f dist=%.0f", SPRING_RX, SPRING_RY, DIST))
 end

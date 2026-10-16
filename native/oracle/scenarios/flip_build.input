@@ -1,0 +1,4 @@
+# FLIP bookmark input for the "build" shot. The Recoil ref selects the commander and sets the
+# armmex build command active (preview only); it never places, so nothing here places either.
+5 box 400 200 900 520
+15 pick armmex

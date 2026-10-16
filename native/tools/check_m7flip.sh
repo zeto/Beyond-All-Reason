@@ -62,9 +62,10 @@ capture_bar() {
   fi
 }
 
-capture_bar select  "$ROOT/native/oracle/scenarios/select_commander.input" 45
-capture_bar build   "$ROOT/native/oracle/scenarios/build_mex.input" 60
-capture_bar minimap "$ROOT/native/oracle/scenarios/minimap_move.input" 45
+# FLIP inputs mirror the Recoil ref: selection only, no orders that turn the commander.
+capture_bar select  "$ROOT/native/oracle/scenarios/flip_select.input" 45
+capture_bar build   "$ROOT/native/oracle/scenarios/flip_build.input" 60
+capture_bar minimap "$ROOT/native/oracle/scenarios/flip_minimap.input" 45
 capture_bar hud     "$ROOT/native/oracle/scenarios/hud_status.input" 60
 # widgets: reuse window/topbar input if present, else select
 if [[ -f "$ROOT/native/oracle/scenarios/window_hud.input" ]]; then

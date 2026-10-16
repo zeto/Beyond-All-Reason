@@ -3,6 +3,7 @@
 # Usage: run_shot.sh --shot NAME [--frames N] [--damage FRAC] [--builddef DEF] [--select 0|1]
 #        [--cam x,y,z,distance,tilt,yaw]  (fixed bookmark camera instead of the commander lock)
 #        [--los 0|1]  (0 turns BAR's LOS map view off)
+#        [--disable-widget NAME]  (diagnostic only: disable one BAR widget by name; official refs never pass it)
 # Writes PNG to /tmp/bar-oracle/screenshots/NAME.png (oracle write-dir only).
 set -euo pipefail
 
@@ -15,6 +16,7 @@ SHOTFRAME="60"
 CAMMODE="spring_orbit"
 CAM=""
 LOS="1"
+DISABLE_WIDGET=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -27,6 +29,7 @@ while [[ $# -gt 0 ]]; do
     --cammode) CAMMODE="${2:?}"; shift 2 ;;
     --cam) CAM="${2:?}"; shift 2 ;;
     --los) LOS="${2:?}"; shift 2 ;;
+    --disable-widget) DISABLE_WIDGET="${2:?}"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -124,6 +127,7 @@ cat > "$ROOT/boot.txt" <<BOOTEOF
 		barmetal_cammode=${CAMMODE};
 		barmetal_cam=${CAM};
 		barmetal_los=${LOS};
+		barmetal_disable_widget=${DISABLE_WIDGET};
 	}
 	[ALLYTEAM0]
 	{

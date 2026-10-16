@@ -1,0 +1,4 @@
+# FLIP bookmark input for the "select" shot. The headed Recoil ref (shot_gadget.lua) only
+# selects the commander and gives no order, so this input gives none either: a move order
+# would turn the commander to face east (profile) while the ref keeps its spawn facing.
+5 box 400 200 900 520
