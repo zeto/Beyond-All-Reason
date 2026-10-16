@@ -1,5 +1,7 @@
 #include "build_cmd.h"
 
+#include "checklist.h"
+
 #include "unitdef.h"
 #include "gadget_host.h"
 
@@ -270,6 +272,17 @@ void build_append_preview(HudList& hud, const float* view_proj, int view_w, int 
     }
 }
 
+
+void build_cycle_facing(int absolute_or_neg1) {
+    if (absolute_or_neg1 >= 0) {
+        g_build.facing = absolute_or_neg1 & 3;
+    } else {
+        g_build.facing = (g_build.facing + 1) & 3;
+    }
+    checklist_note_facing(g_build.facing);
+    std::cout << "build facing " << g_build.facing << "\n";
+}
+
 bool load_build_events(const std::string& path, std::vector<BuildEvent>& events, std::string& error) {
     events.clear();
     std::ifstream in(path);
@@ -303,8 +316,12 @@ bool load_build_events(const std::string& path, std::vector<BuildEvent>& events,
                 error = "place needs def x z";
                 return false;
             }
-        } else if (kind == "box" || kind == "move" || kind == "mmap" || kind == "minimap" || kind == "hover" || kind == "damage") {
-            continue;  // selection/minimap events in a shared --input file
+        } else if (kind == "box" || kind == "move" || kind == "click" || kind == "shiftmove" ||
+                   kind == "attack" || kind == "facing" || kind == "groupset" || kind == "group" ||
+                   kind == "pause" || kind == "gamespeed" || kind == "reclaim" || kind == "repair" ||
+                   kind == "spawn" || kind == "mmap" || kind == "minimap" || kind == "hover" ||
+                   kind == "damage") {
+            continue;  // selection/checklist/minimap events in a shared --input file
         } else {
             error = "unknown build event " + kind;
             return false;

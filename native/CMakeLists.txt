@@ -73,6 +73,7 @@ add_executable(bar-metal
   lua/gl/gl_api.cpp
   ui/widget_host.cpp
   ui/selection.cpp
+  ui/checklist.cpp
   ui/build_cmd.cpp
   ui/minimap.cpp
   ui/hud_status.cpp

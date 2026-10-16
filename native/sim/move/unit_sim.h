@@ -62,7 +62,7 @@ bool sim_add_unit(UnitSim& sim, const UnitSpawn& spawn, const UnitMotion& motion
                   std::string& error);
 
 bool sim_order_move(UnitSim& sim, int index, float goal_x, float goal_z, const TerrainMesh& terrain,
-                    std::string& error);
+                    std::string& error, bool append = false);
 
 void sim_step(UnitSim& sim, const TerrainMesh& terrain);
 

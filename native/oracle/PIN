@@ -4,5 +4,5 @@ trace: captured
 binary: /Applications/BAR Launcher.app/Contents/MacOS/spring
 game: Beyond All Reason test-31578-8247b61
 method: mutator BAR Metal Oracle, commander samples echoed from the headed client
-scenarios: boot, move_kbot, select_commander, build_mex, minimap_move, health_range
-notes: minimap_move has no Recoil minimap-click path; recorded as the equivalent CMD.MOVE to 8000,4900 (same destination as select_commander). Selection is UI-side in Recoil; traces mark the ordered commander as sel. Build command ids are -UnitDef.id and differ across engines; compare by def name and world x/z. Pixels stay self-only.
+scenarios: boot, move_kbot, select_commander, build_mex, minimap_move, health_range, click_select, shift_queue, attack, pause_speed, reclaim, repair, facing
+notes: minimap_move has no Recoil minimap-click path; recorded as equivalent CMD.MOVE. Selection is UI-side; traces mark the ordered commander as sel. Build -UnitDef.id differs across engines. control_groups and drag_box are client UI (self-only; drag_box covered by select box self-check). pause/gamespeed recorded via SendCommands. Pixels stay self-only. HUD FLIP bookmarks still outstanding for official M7 exit.

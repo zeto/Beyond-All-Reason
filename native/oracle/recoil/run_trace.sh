@@ -13,6 +13,14 @@ FRAMES="30"
 MOVE=""
 BUILD=""
 DAMAGE=""
+ATTACK=""
+SHIFTMOVE=""
+PAUSE_AT=""
+SPEED_AT=""
+RECLAIM=""
+REPAIR=""
+FACING=""
+SPAWN=""
 
 if [[ "${1:-}" == "--scenario" ]]; then
   shift
@@ -24,6 +32,14 @@ if [[ "${1:-}" == "--scenario" ]]; then
       --move) MOVE="${2:?}"; shift 2 ;;
       --build) BUILD="${2:?}"; shift 2 ;;
       --damage) DAMAGE="${2:?}"; shift 2 ;;
+      --attack) ATTACK="${2:?}"; shift 2 ;;
+      --shiftmove) SHIFTMOVE="${2:?}"; shift 2 ;;
+      --pause) PAUSE_AT="${2:?}"; shift 2 ;;
+      --gamespeed) SPEED_AT="${2:?}"; shift 2 ;;
+      --reclaim) RECLAIM="${2:?}"; shift 2 ;;
+      --repair) REPAIR="${2:?}"; shift 2 ;;
+      --facing) FACING="${2:?}"; shift 2 ;;
+      --spawn) SPAWN="${2:?}"; shift 2 ;;
       *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
   done
@@ -101,6 +117,14 @@ cat > "$ROOT/boot.txt" <<BOOTEOF
 		barmetal_scenario=${SCENARIO};
 		barmetal_build=${BUILD};
 		barmetal_damage=${DAMAGE};
+		barmetal_attack=${ATTACK};
+		barmetal_shiftmove=${SHIFTMOVE};
+		barmetal_pause=${PAUSE_AT};
+		barmetal_gamespeed=${SPEED_AT};
+		barmetal_reclaim=${RECLAIM};
+		barmetal_repair=${REPAIR};
+		barmetal_facing=${FACING};
+		barmetal_spawn=${SPAWN};
 	}
 	[ALLYTEAM0]
 	{

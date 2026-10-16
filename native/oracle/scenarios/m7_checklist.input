@@ -1,0 +1,28 @@
+# M7 player checklist (plan.md). Frames = presented counter under --lock-camera.
+# 1) left-click select (explicit click, not a drag)
+5 click 640 360
+# 2) drag box select
+15 box 400 200 900 520
+# control groups 1-9
+20 groupset 1
+25 group 1
+# shift-queue: move then shift-move
+30 move 7800 4900
+35 shiftmove 8000 4900
+# build facing with existing key cycle ([ / ] style)
+40 facing
+42 facing
+44 facing 2
+# pause + gamespeed 1-4
+50 pause 1
+55 pause 0
+60 gamespeed 2
+62 gamespeed 3
+64 gamespeed 4
+66 gamespeed 1
+# spawn enemy (sim only; only unit 0 mesh drawn) then attack
+70 spawn armcom 8000 4900 1
+75 attack 2
+# reclaim order at metal spot, repair the enemy (damaged)
+80 reclaim 7416 4888
+85 repair 2

@@ -75,4 +75,6 @@ std::vector<CmdDesc> build_unit_cmd_descs(const UnitSim& sim, int unit_id);
 
 int build_cmd_desc_index(int cmd_id);
 
+void build_cycle_facing(int absolute_or_neg1);
+
 }  // namespace bar

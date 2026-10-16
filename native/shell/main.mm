@@ -23,6 +23,7 @@
 #include "gadget_host.h"
 #include "widget_host.h"
 #include "selection.h"
+#include "checklist.h"
 #include "build_cmd.h"
 #include "minimap.h"
 #include "hud_status.h"
@@ -720,6 +721,7 @@ int run_terrain(const Options& options, const std::string& game_name) {
         }
     }
     bar::selection_reset();
+    bar::checklist_reset();
     bar::build_cmd_reset();
     auto place_model = [&](float distance) {
         if (sim.x.empty()) {
@@ -910,7 +912,11 @@ int run_terrain(const Options& options, const std::string& game_name) {
     int sim_frame = 0;
     bool ai_failed = false;
     auto step_unit = [&]() {
-        bar::sim_step(sim, mesh);
+        if (!bar::checklist_state().paused) {
+                    for (int _gs = 0; _gs < std::max(1, bar::checklist_state().gamespeed); ++_gs) {
+                        bar::sim_step(sim, mesh);
+                    }
+                }
         if (have_resources) {
             for (bar::TeamResources& row : team_rows) {
                 bar::team_resources_step(row);
@@ -1191,7 +1197,7 @@ int run_terrain(const Options& options, const std::string& game_name) {
             bar::minimap_set_world(mesh.world_x, mesh.world_z, camera.view_width, camera.view_height);
             bar::widgets_set_view_proj(pose.view_proj);
             if (scripted) {
-                if (!bar::apply_select_events(sim, select_events, presented, mesh, error)) {
+                if (!bar::apply_select_events(sim, select_events, presented, mesh, options.game_root, error)) {
                     std::cerr << "input: " << error << "\n";
                     return 1;
                 }
@@ -1589,7 +1595,14 @@ int run_terrain(const Options& options, const std::string& game_name) {
         const std::filesystem::path build_path =
             options.trace.empty() ? std::filesystem::path("native/oracle/out/m7select/build.json")
                                   : std::filesystem::path(options.trace).parent_path() / "build.json";
-        if (!bar::write_build_report(build_path.string(), presented, error)) {
+                {
+            const auto check_path = report_path.parent_path() / "checklist.json";
+            if (!bar::write_checklist_report(check_path.string(), error)) {
+                std::cerr << "checklist: " << error << "\n";
+                return 1;
+            }
+        }
+if (!bar::write_build_report(build_path.string(), presented, error)) {
             std::cerr << "build: " << error << "\n";
             return 1;
         }

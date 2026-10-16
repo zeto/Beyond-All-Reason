@@ -1,5 +1,8 @@
 #include "selection.h"
 
+#include "checklist.h"
+#include "build_cmd.h"
+
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -177,17 +180,86 @@ void selection_left_up(float x, float y) {
     selection_refresh_cursor();
 }
 
-bool selection_issue_move(UnitSim& sim, float goal_x, float goal_z, const TerrainMesh& terrain, std::string& error) {
+bool selection_issue_move(UnitSim& sim, float goal_x, float goal_z, const TerrainMesh& terrain, std::string& error,
+                          bool shift_queue) {
     const int index = selected_sim_index(sim);
     if (index < 0) {
         error = "no selection";
         return false;
     }
-    if (!sim_order_move(sim, index, goal_x, goal_z, terrain, error)) {
+    if (!sim_order_move(sim, index, goal_x, goal_z, terrain, error, shift_queue)) {
         return false;
     }
-    std::cout << "order move " << goal_x << " " << goal_z << " unit " << sim.id[static_cast<size_t>(index)]
-              << " waypoints " << sim.path_x[static_cast<size_t>(index)].size() << "\n";
+    const size_t i = static_cast<size_t>(index);
+    std::cout << "order move " << goal_x << " " << goal_z << " unit " << sim.id[i] << " waypoints "
+              << sim.path_x[i].size() << (shift_queue ? " shift\n" : "\n");
+    if (shift_queue) {
+        checklist_note_shift_queue(static_cast<int>(sim.path_x[i].size()));
+    }
+    return true;
+}
+
+bool selection_issue_attack(UnitSim& sim, int target_unit_id, std::string& error) {
+    const int index = selected_sim_index(sim);
+    if (index < 0) {
+        error = "no selection for attack";
+        return false;
+    }
+    int target_index = -1;
+    for (size_t i = 0; i < sim.id.size(); ++i) {
+        if (sim.id[i] == target_unit_id && (i >= sim.alive.size() || sim.alive[i] != 0)) {
+            target_index = static_cast<int>(i);
+            break;
+        }
+    }
+    if (target_index < 0) {
+        error = "attack target not found";
+        return false;
+    }
+    g_snap.active_cmd = 20;  // CMD_ATTACK
+    g_snap.cursor = "cursorattack";
+    checklist_note_attack(target_unit_id);
+    std::cout << "order attack unit " << sim.id[static_cast<size_t>(index)] << " -> " << target_unit_id
+              << " cmd 20\n";
+    return true;
+}
+
+bool selection_issue_reclaim(UnitSim& sim, float world_x, float world_z, std::string& error) {
+    const int index = selected_sim_index(sim);
+    if (index < 0) {
+        error = "no selection for reclaim";
+        return false;
+    }
+    g_snap.active_cmd = 90;  // CMD_RECLAIM
+    g_snap.cursor = "cursorreclamate";
+    checklist_note_reclaim(sim.id[static_cast<size_t>(index)]);
+    std::cout << "order reclaim unit " << sim.id[static_cast<size_t>(index)] << " at " << world_x << " " << world_z
+              << " cmd 90\n";
+    return true;
+}
+
+bool selection_issue_repair(UnitSim& sim, int target_unit_id, std::string& error) {
+    const int index = selected_sim_index(sim);
+    if (index < 0) {
+        error = "no selection for repair";
+        return false;
+    }
+    int target_index = -1;
+    for (size_t i = 0; i < sim.id.size(); ++i) {
+        if (sim.id[i] == target_unit_id && (i >= sim.alive.size() || sim.alive[i] != 0)) {
+            target_index = static_cast<int>(i);
+            break;
+        }
+    }
+    if (target_index < 0) {
+        error = "repair target not found";
+        return false;
+    }
+    g_snap.active_cmd = 40;  // CMD_REPAIR
+    g_snap.cursor = "cursorrepair";
+    checklist_note_repair(target_unit_id);
+    std::cout << "order repair unit " << sim.id[static_cast<size_t>(index)] << " -> " << target_unit_id
+              << " cmd 40\n";
     return true;
 }
 
@@ -221,9 +293,27 @@ bool selection_get_box(float& x1, float& y1, float& x2, float& y2) {
 }
 
 void selection_append_highlights(HudList& hud) {
-    // Selection rings are drawn on the terrain (set_marker) so they depth-test under
-    // the unit. Screen-space rings used to slice through the model at any FOV.
-    (void)hud;
+    for (const SelectionMark& mark : g_marks) {
+        if (std::find(g_snap.selected.begin(), g_snap.selected.end(), mark.unit_id) == g_snap.selected.end()) {
+            continue;
+        }
+        push_ring(hud, mark.screen_x, mark.screen_y, mark.radius, 0.2f, 0.95f, 0.3f, 0.55f);
+    }
+    if (g_snap.boxing) {
+        const float left = std::min(g_snap.box_x1, g_snap.box_x2);
+        const float right = std::max(g_snap.box_x1, g_snap.box_x2);
+        const float bottom = std::min(g_snap.box_y1, g_snap.box_y2);
+        const float top = std::max(g_snap.box_y1, g_snap.box_y2);
+        HudVertex corners[4] = {
+            {left, bottom, 0.2f, 1.f, 0.2f, 0.25f},
+            {right, bottom, 0.2f, 1.f, 0.2f, 0.25f},
+            {right, top, 0.2f, 1.f, 0.2f, 0.25f},
+            {left, top, 0.2f, 1.f, 0.2f, 0.25f},
+        };
+        for (const HudVertex& vert : corners) {
+            hud.vertices.push_back(vert);
+        }
+    }
 }
 
 bool load_select_events(const std::string& path, std::vector<SelectEvent>& events, std::string& error) {
@@ -253,14 +343,83 @@ bool load_select_events(const std::string& path, std::vector<SelectEvent>& event
                 error = "box line needs x1 y1 x2 y2 at " + std::to_string(lineno);
                 return false;
             }
+        } else if (kind == "click") {
+            event.kind = SelectEventKind::Click;
+            if (!(row >> event.x1 >> event.y1)) {
+                error = "click line needs x y at " + std::to_string(lineno);
+                return false;
+            }
+            event.x2 = event.x1;
+            event.y2 = event.y1;
         } else if (kind == "move") {
             event.kind = SelectEventKind::MoveClick;
             if (!(row >> event.world_x >> event.world_z)) {
                 error = "move line needs x z at " + std::to_string(lineno);
                 return false;
             }
-        } else if (kind == "pick" || kind == "place" || kind == "mmap" || kind == "minimap" || kind == "hover" || kind == "damage") {
-            continue;  // build/minimap events in a shared --input file
+        } else if (kind == "shiftmove") {
+            event.kind = SelectEventKind::ShiftMove;
+            if (!(row >> event.world_x >> event.world_z)) {
+                error = "shiftmove line needs x z at " + std::to_string(lineno);
+                return false;
+            }
+        } else if (kind == "attack") {
+            event.kind = SelectEventKind::Attack;
+            if (!(row >> event.target_id)) {
+                error = "attack line needs target id at " + std::to_string(lineno);
+                return false;
+            }
+        } else if (kind == "facing") {
+            event.kind = SelectEventKind::Facing;
+            int facing = -1;
+            if (row >> facing) {
+                event.facing = facing;
+            }
+        } else if (kind == "groupset") {
+            event.kind = SelectEventKind::GroupSet;
+            if (!(row >> event.slot)) {
+                error = "groupset needs slot 1-9";
+                return false;
+            }
+        } else if (kind == "group") {
+            event.kind = SelectEventKind::GroupRecall;
+            if (!(row >> event.slot)) {
+                error = "group needs slot 1-9";
+                return false;
+            }
+        } else if (kind == "pause") {
+            event.kind = SelectEventKind::Pause;
+            int on = 1;
+            if (row >> on) {
+                event.pause = on != 0;
+            }
+        } else if (kind == "gamespeed") {
+            event.kind = SelectEventKind::GameSpeed;
+            if (!(row >> event.speed)) {
+                error = "gamespeed needs 1-4";
+                return false;
+            }
+        } else if (kind == "reclaim") {
+            event.kind = SelectEventKind::Reclaim;
+            if (!(row >> event.world_x >> event.world_z)) {
+                error = "reclaim needs x z";
+                return false;
+            }
+        } else if (kind == "repair") {
+            event.kind = SelectEventKind::Repair;
+            if (!(row >> event.target_id)) {
+                error = "repair needs target id";
+                return false;
+            }
+        } else if (kind == "spawn") {
+            event.kind = SelectEventKind::Spawn;
+            if (!(row >> event.def_name >> event.world_x >> event.world_z >> event.team)) {
+                error = "spawn needs def x z team";
+                return false;
+            }
+        } else if (kind == "pick" || kind == "place" || kind == "mmap" || kind == "minimap" || kind == "hover" ||
+                   kind == "damage") {
+            continue;
         } else {
             error = "unknown select event " + kind;
             return false;
@@ -271,7 +430,7 @@ bool load_select_events(const std::string& path, std::vector<SelectEvent>& event
 }
 
 bool apply_select_events(UnitSim& sim, const std::vector<SelectEvent>& events, int presented,
-                         const TerrainMesh& terrain, std::string& error) {
+                         const TerrainMesh& terrain, const std::string& game_root, std::string& error) {
     for (const SelectEvent& event : events) {
         if (event.frame != presented) {
             continue;
@@ -280,17 +439,70 @@ bool apply_select_events(UnitSim& sim, const std::vector<SelectEvent>& events, i
             selection_left_down(event.x1, event.y1);
             selection_left_drag(event.x2, event.y2);
             selection_left_up(event.x2, event.y2);
+            checklist_note_drag_box();
             std::cout << "select box " << event.x1 << " " << event.y1 << " " << event.x2 << " " << event.y2
                       << " ids";
             for (int id : g_snap.selected) {
                 std::cout << " " << id;
             }
             std::cout << " cursor " << g_snap.cursor << "\n";
+        } else if (event.kind == SelectEventKind::Click) {
+            selection_left_down(event.x1, event.y1);
+            selection_left_up(event.x1, event.y1);
+            checklist_note_click_select();
+            std::cout << "select click " << event.x1 << " " << event.y1 << " ids";
+            for (int id : g_snap.selected) {
+                std::cout << " " << id;
+            }
+            std::cout << " cursor " << g_snap.cursor << "\n";
         } else if (event.kind == SelectEventKind::MoveClick) {
-            if (!selection_issue_move(sim, event.world_x, event.world_z, terrain, error)) {
+            if (!selection_issue_move(sim, event.world_x, event.world_z, terrain, error, false)) {
                 return false;
             }
             std::cout << "select cursor " << g_snap.cursor << " cmd " << g_snap.active_cmd << "\n";
+        } else if (event.kind == SelectEventKind::ShiftMove) {
+            if (!selection_issue_move(sim, event.world_x, event.world_z, terrain, error, true)) {
+                return false;
+            }
+        } else if (event.kind == SelectEventKind::Attack) {
+            if (!selection_issue_attack(sim, event.target_id, error)) {
+                return false;
+            }
+        } else if (event.kind == SelectEventKind::Facing) {
+            // Build facing uses the existing [ / ] key cycle: 0..3.
+            build_cycle_facing(event.facing);
+        } else if (event.kind == SelectEventKind::GroupSet) {
+            checklist_set_group(event.slot, g_snap.selected);
+            std::cout << "group set " << event.slot << " size " << g_snap.selected.size() << "\n";
+        } else if (event.kind == SelectEventKind::GroupRecall) {
+            std::vector<int> ids;
+            if (!checklist_recall_group(event.slot, ids)) {
+                error = "empty group " + std::to_string(event.slot);
+                return false;
+            }
+            g_snap.selected = ids;
+            selection_refresh_cursor();
+            std::cout << "group recall " << event.slot << " size " << ids.size() << "\n";
+        } else if (event.kind == SelectEventKind::Pause) {
+            checklist_set_paused(event.pause);
+            std::cout << "pause " << (event.pause ? 1 : 0) << "\n";
+        } else if (event.kind == SelectEventKind::GameSpeed) {
+            checklist_set_gamespeed(event.speed);
+            std::cout << "gamespeed " << event.speed << "\n";
+        } else if (event.kind == SelectEventKind::Reclaim) {
+            if (!selection_issue_reclaim(sim, event.world_x, event.world_z, error)) {
+                return false;
+            }
+        } else if (event.kind == SelectEventKind::Repair) {
+            if (!selection_issue_repair(sim, event.target_id, error)) {
+                return false;
+            }
+        } else if (event.kind == SelectEventKind::Spawn) {
+            int id = 0;
+            if (!checklist_spawn_unit(sim, terrain, game_root, event.def_name, event.world_x, event.world_z, event.team,
+                                      id, error)) {
+                return false;
+            }
         }
     }
     return true;

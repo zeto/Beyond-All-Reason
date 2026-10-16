@@ -305,7 +305,7 @@ bool sim_add_unit(UnitSim& sim, const UnitSpawn& spawn, const UnitMotion& motion
 }
 
 bool sim_order_move(UnitSim& sim, int index, float goal_x, float goal_z, const TerrainMesh& terrain,
-                    std::string& error) {
+                    std::string& error, bool append) {
     if (index < 0 || index >= static_cast<int>(sim.x.size())) {
         error = "move order has no unit";
         return false;
@@ -315,21 +315,28 @@ bool sim_order_move(UnitSim& sim, int index, float goal_x, float goal_z, const T
         error = sim.def_name[i] + " cannot move";
         return false;
     }
+    float from_x = sim.x[i];
+    float from_z = sim.z[i];
+    if (append && !sim.path_x[i].empty()) {
+        from_x = sim.path_x[i].back();
+        from_z = sim.path_z[i].back();
+    }
     std::vector<Waypoint> path;
     if (sim.gunship[i] || sim.airplane[i]) {
-        // A gunship or an airplane flies over the terrain. The goal is the only waypoint.
         path.push_back(Waypoint{goal_x, goal_z});
-    } else if (!build_ground_path(terrain, sim.max_slope[i], sim.max_water[i], sim.min_water[i], sim.x[i], sim.z[i],
+    } else if (!build_ground_path(terrain, sim.max_slope[i], sim.max_water[i], sim.min_water[i], from_x, from_z,
                                   goal_x, goal_z, path, error, sim.hover[i] != 0)) {
         return false;
     }
-    sim.path_x[i].clear();
-    sim.path_z[i].clear();
+    if (!append) {
+        sim.path_x[i].clear();
+        sim.path_z[i].clear();
+        sim.path_at[i] = 0;
+    }
     for (const Waypoint& point : path) {
         sim.path_x[i].push_back(point.x);
         sim.path_z[i].push_back(point.z);
     }
-    sim.path_at[i] = 0;
     sim.has_goal[i] = 1;
     return true;
 }

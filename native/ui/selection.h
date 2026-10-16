@@ -8,7 +8,6 @@
 
 namespace bar {
 
-// Screen-space mark for one living unit. y grows up from the view bottom.
 struct SelectionMark {
     int unit_id = 0;
     int sim_index = 0;
@@ -28,8 +27,22 @@ struct SelectionSnapshot {
     float box_y2 = 0;
 };
 
-// One scripted pointer event. Frames match the shell's presented counter.
-enum class SelectEventKind { Box, MoveClick };
+// Scripted pointer / order events. Frames match the shell presented counter.
+enum class SelectEventKind {
+    Box,
+    Click,       // left-click select (no drag)
+    MoveClick,   // right-click move
+    ShiftMove,   // shift-queue move waypoint
+    Attack,      // right-click attack target unit id
+    Facing,      // cycle build facing 0..3 (or set absolute)
+    GroupSet,    // ctrl+N store selection
+    GroupRecall, // N recall group
+    Pause,
+    GameSpeed,   // 1..4
+    Reclaim,     // reclaim at world xz (wreck def name optional in report)
+    Repair,      // repair target unit id
+    Spawn,       // spawn def x z team (sim only; mesh still unit 0)
+};
 
 struct SelectEvent {
     int frame = 0;
@@ -40,6 +53,13 @@ struct SelectEvent {
     float y2 = 0;
     float world_x = 0;
     float world_z = 0;
+    int target_id = 0;
+    int slot = 0;
+    int facing = -1;  // -1 = cycle, else absolute 0..3
+    int speed = 1;
+    bool pause = true;
+    std::string def_name;
+    int team = 1;
 };
 
 void selection_reset();
@@ -51,13 +71,18 @@ void selection_set_mouse(float x, float y, bool left, bool middle, bool right, b
 
 void selection_set_marks(const std::vector<SelectionMark>& marks);
 
-// Left press / drag / release in view points (y up). A release finalizes the box.
 void selection_left_down(float x, float y);
 void selection_left_drag(float x, float y);
 void selection_left_up(float x, float y);
 
-// Right-click move target in world xz. Returns false when nothing is selected.
-bool selection_issue_move(UnitSim& sim, float goal_x, float goal_z, const TerrainMesh& terrain, std::string& error);
+bool selection_issue_move(UnitSim& sim, float goal_x, float goal_z, const TerrainMesh& terrain, std::string& error,
+                          bool shift_queue = false);
+
+bool selection_issue_attack(UnitSim& sim, int target_unit_id, std::string& error);
+
+bool selection_issue_reclaim(UnitSim& sim, float world_x, float world_z, std::string& error);
+
+bool selection_issue_repair(UnitSim& sim, int target_unit_id, std::string& error);
 
 void selection_set_cursor(const std::string& name);
 void selection_refresh_cursor();
@@ -66,14 +91,12 @@ const SelectionSnapshot& selection_snapshot();
 
 bool selection_get_box(float& x1, float& y1, float& x2, float& y2);
 
-// Append green selection rings for the current marks into a published HUD list.
 void selection_append_highlights(HudList& hud);
 
 bool load_select_events(const std::string& path, std::vector<SelectEvent>& events, std::string& error);
 
-// Apply scripted box / move events for this presented frame.
 bool apply_select_events(UnitSim& sim, const std::vector<SelectEvent>& events, int presented,
-                         const TerrainMesh& terrain, std::string& error);
+                         const TerrainMesh& terrain, const std::string& game_root, std::string& error);
 
 bool write_selection_report(const std::string& path, int frame, std::string& error);
 

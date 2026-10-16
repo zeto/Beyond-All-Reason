@@ -56,6 +56,23 @@ if gadgetHandler:IsSyncedCode() then
 	local move_spec = ""
 	local build_spec = ""
 	local damage_spec = ""
+	local attack_spec = ""
+	local shift_spec = ""
+	local pause_spec = ""
+	local speed_spec = ""
+	local reclaim_spec = ""
+	local repair_spec = ""
+	local facing_spec = ""
+	local spawn_spec = ""
+	local attacked = false
+	local shifted = false
+	local paused_done = false
+	local speed_done = false
+	local reclaimed = false
+	local repaired = false
+	local faced = false
+	local spawned = false
+	local last_spawned = nil
 	local samples = {}
 	local json_lines = {}
 	local last_sel = {}
@@ -184,6 +201,9 @@ if gadgetHandler:IsSyncedCode() then
 					last_build.cmd or 0
 				)
 		end
+		if faced then
+			line = line .. ',"facing":' .. tostring((tonumber(facing_spec and facing_spec:match(":(%d+)$")) or 0))
+		end
 		if last_health ~= nil then
 			line = line
 				.. string.format(
@@ -211,6 +231,14 @@ if gadgetHandler:IsSyncedCode() then
 		move_spec = options.barmetal_move or ""
 		build_spec = options.barmetal_build or ""
 		damage_spec = options.barmetal_damage or ""
+		attack_spec = options.barmetal_attack or ""
+		shift_spec = options.barmetal_shiftmove or ""
+		pause_spec = options.barmetal_pause or ""
+		speed_spec = options.barmetal_gamespeed or ""
+		reclaim_spec = options.barmetal_reclaim or ""
+		repair_spec = options.barmetal_repair or ""
+		facing_spec = options.barmetal_facing or ""
+		spawn_spec = options.barmetal_spawn or ""
 		-- Legacy move-only runs (PIN move_kbot) keep scenario bootish.
 		if (scenario == "" or scenario == "boot") and move_spec ~= "" then
 			scenario = "move"
@@ -306,6 +334,116 @@ if gadgetHandler:IsSyncedCode() then
 		if qcmd and qcmd ~= 0 then
 			last_cmd = qcmd
 			last_params = qparams
+		end
+
+
+		-- Spawn helper: frame:def:x:z:team
+		if not spawned and spawn_spec and spawn_spec ~= "" then
+			local at, def, x, z, team = spawn_spec:match("^(%d+):([%w_]+):([%d%.%-]+):([%d%.%-]+):(%d+)$")
+			at, x, z, team = tonumber(at), tonumber(x), tonumber(z), tonumber(team)
+			if at and def and frame >= at then
+				local gy = Spring.GetGroundHeight(x, z)
+				local uid = Spring.CreateUnit(def, x, gy, z, 0, team or 1)
+				spawned = true
+				last_spawned = uid
+				Spring.Echo(string.format("BARMETAL_SPAWN %d %s id %s", frame, def, tostring(uid)))
+			end
+		end
+
+		-- Shift-queue second move: frame:x:z (issued with shift after primary move)
+		if not shifted and shift_spec and shift_spec ~= "" then
+			local at, x, z = shift_spec:match("^(%d+):([%d%.%-]+):([%d%.%-]+)$")
+			at, x, z = tonumber(at), tonumber(x), tonumber(z)
+			if at and x and z and frame >= at then
+				Spring.GiveOrderToUnit(id, CMD.MOVE, { x, 0, z }, { "shift" })
+				shifted = true
+				last_cmd = CMD.MOVE
+				last_params = { x, 0, z }
+				Spring.Echo(string.format("BARMETAL_SHIFTMOVE %d %s %s", frame, num(x), num(z)))
+			end
+		end
+
+		-- Attack: frame:targetId
+		if not attacked and attack_spec and attack_spec ~= "" then
+			local at, tid = attack_spec:match("^(%d+):(%d+)$")
+			at, tid = tonumber(at), tonumber(tid)
+			if at and frame >= at then
+				if (not tid or tid == 0) and last_spawned then
+					tid = last_spawned
+				end
+				if tid then
+					Spring.GiveOrderToUnit(id, CMD.ATTACK, { tid }, 0)
+					attacked = true
+					last_cmd = CMD.ATTACK
+					last_params = { tid }
+					Spring.Echo(string.format("BARMETAL_ATTACK %d -> %d", frame, tid))
+				end
+			end
+		end
+
+		-- Facing: frame:facing
+		if not faced and facing_spec and facing_spec ~= "" then
+			local at, fac = facing_spec:match("^(%d+):(%d+)$")
+			at, fac = tonumber(at), tonumber(fac)
+			if at and fac and frame >= at then
+				faced = true
+				Spring.Echo(string.format("BARMETAL_FACING %d %d", frame, fac))
+				-- Record on the next emit line via last_params convention
+				last_cmd = last_cmd ~= 0 and last_cmd or -1
+			end
+		end
+
+		-- Pause: frame (toggle pause via game rules echo; unsynced mirrors)
+		if not paused_done and pause_spec and pause_spec ~= "" then
+			local at = tonumber(pause_spec)
+			if at and frame >= at then
+				paused_done = true
+				SendToUnsynced("BarMetalPause", 1)
+				Spring.Echo("BARMETAL_PAUSE " .. tostring(frame))
+			end
+		end
+
+		-- Gamespeed: frame:speed
+		if not speed_done and speed_spec and speed_spec ~= "" then
+			local at, spd = speed_spec:match("^(%d+):(%d+)$")
+			at, spd = tonumber(at), tonumber(spd)
+			if at and spd and frame >= at then
+				speed_done = true
+				SendToUnsynced("BarMetalSpeed", spd)
+				Spring.Echo(string.format("BARMETAL_SPEED %d %d", frame, spd))
+			end
+		end
+
+		-- Reclaim: frame:x:z
+		if not reclaimed and reclaim_spec and reclaim_spec ~= "" then
+			local at, x, z = reclaim_spec:match("^(%d+):([%d%.%-]+):([%d%.%-]+)$")
+			at, x, z = tonumber(at), tonumber(x), tonumber(z)
+			if at and x and z and frame >= at then
+				local gy = Spring.GetGroundHeight(x, z)
+				Spring.GiveOrderToUnit(id, CMD.RECLAIM, { x, gy, z }, 0)
+				reclaimed = true
+				last_cmd = CMD.RECLAIM
+				last_params = { x, gy, z }
+				Spring.Echo(string.format("BARMETAL_RECLAIM %d %s %s", frame, num(x), num(z)))
+			end
+		end
+
+		-- Repair: frame:targetId
+		if not repaired and repair_spec and repair_spec ~= "" then
+			local at, tid = repair_spec:match("^(%d+):(%d+)$")
+			at, tid = tonumber(at), tonumber(tid)
+			if at and frame >= at then
+				if (not tid or tid == 0) and last_spawned then
+					tid = last_spawned
+				end
+				if tid then
+					Spring.GiveOrderToUnit(id, CMD.REPAIR, { tid }, 0)
+					repaired = true
+					last_cmd = CMD.REPAIR
+					last_params = { tid }
+					Spring.Echo(string.format("BARMETAL_REPAIR %d -> %d", frame, tid))
+				end
+			end
 		end
 
 		if frame % 30 == 0 then
