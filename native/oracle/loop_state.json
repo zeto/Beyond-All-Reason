@@ -2,5 +2,5 @@
   "milestone": "M7",
   "slice": "hud",
   "iteration": 1,
-  "last_gate": "self-pass"
+  "last_gate": "oracle-pass"
 }

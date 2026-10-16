@@ -1,13 +1,40 @@
 #!/bin/bash
 # Run the pinned BAR Launcher spring and echo a commander trace.
-# Usage: run_trace.sh [frames] [move]
-#   frames  last sample frame (default 30)
-#   move    "frame:x:z" order for the commander, or empty
-# The engine log is /tmp/bar-oracle/infolog.txt. Commander samples are the
-# BARMETAL_PATH line at the last frame.
+# Usage:
+#   run_trace.sh [frames] [move]                         # legacy boot/move
+#   run_trace.sh --scenario NAME [--frames N] [--move F:X:Z]
+#                [--build F:DEF:X:Z] [--damage F:FRAC]
+# The engine log is /tmp/bar-oracle/infolog.txt. Lines land in
+# /tmp/bar-oracle/trace.jsonl when the unsynced IO bridge works.
 set -euo pipefail
-FRAMES="${1:-30}"
-MOVE="${2:-}"
+
+SCENARIO="boot"
+FRAMES="30"
+MOVE=""
+BUILD=""
+DAMAGE=""
+
+if [[ "${1:-}" == "--scenario" ]]; then
+  shift
+  SCENARIO="${1:?scenario}"
+  shift || true
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --frames) FRAMES="${2:?}"; shift 2 ;;
+      --move) MOVE="${2:?}"; shift 2 ;;
+      --build) BUILD="${2:?}"; shift 2 ;;
+      --damage) DAMAGE="${2:?}"; shift 2 ;;
+      *) echo "unknown arg: $1" >&2; exit 2 ;;
+    esac
+  done
+else
+  FRAMES="${1:-30}"
+  MOVE="${2:-}"
+  if [[ -n "$MOVE" ]]; then
+    SCENARIO="move"
+  fi
+fi
+
 ROOT="/tmp/bar-oracle"
 HERE="/Applications/BAR Launcher.app/Contents/MacOS"
 RES="/Applications/BAR Launcher.app/Contents/Resources"
@@ -21,7 +48,7 @@ rm -rf "$ROOT" "$MOD"
 mkdir -p "$ROOT/games" "$MOD/luarules/gadgets"
 cp "$REPO/native/oracle/recoil/trace_gadget.lua" \
   "$MOD/luarules/gadgets/bar_metal_oracle_trace.lua"
-cat > "$MOD/modinfo.lua" <<'EOF'
+cat > "$MOD/modinfo.lua" <<'MODEOF'
 return {
   name = "BAR Metal Oracle",
   description = "Dump a Recoil trace for bar-metal",
@@ -35,13 +62,13 @@ return {
     "Beyond All Reason test-31578-8247b61",
   },
 }
-EOF
+MODEOF
 ( cd "$MOD" && /usr/bin/zip -qr "$ROOT/games/bar-metal-oracle.sdz" . )
 ln -s "$DATA/maps" "$ROOT/maps"
 ln -s "$DATA/packages" "$ROOT/packages"
 ln -s "$DATA/pool" "$ROOT/pool"
 ln -s "$DATA/rapid" "$ROOT/rapid"
-cat > "$ROOT/springsettings.cfg" <<'EOF'
+cat > "$ROOT/springsettings.cfg" <<'CFGEOF'
 DevLua = 1
 LogFlush = 1
 VSync = 0
@@ -51,8 +78,8 @@ MaxSounds = 0
 snd_volmaster = 0
 HangTimeout = 0
 Fullscreen = 0
-EOF
-cat > "$ROOT/boot.txt" <<EOF
+CFGEOF
+cat > "$ROOT/boot.txt" <<BOOTEOF
 [GAME]
 {
 	MapName=Supreme Isthmus v2.1;
@@ -71,6 +98,9 @@ cat > "$ROOT/boot.txt" <<EOF
 	{
 		barmetal_frames=${FRAMES};
 		barmetal_move=${MOVE};
+		barmetal_scenario=${SCENARIO};
+		barmetal_build=${BUILD};
+		barmetal_damage=${DAMAGE};
 	}
 	[ALLYTEAM0]
 	{
@@ -91,7 +121,7 @@ cat > "$ROOT/boot.txt" <<EOF
 		Name=Player;
 	}
 }
-EOF
+BOOTEOF
 
 export EGL_PLATFORM=surfaceless
 export VK_ICD_FILENAMES="$ICD"

@@ -4,4 +4,5 @@ trace: captured
 binary: /Applications/BAR Launcher.app/Contents/MacOS/spring
 game: Beyond All Reason test-31578-8247b61
 method: mutator BAR Metal Oracle, commander samples echoed from the headed client
-scenarios: boot, move_kbot
+scenarios: boot, move_kbot, select_commander, build_mex, minimap_move, health_range
+notes: minimap_move has no Recoil minimap-click path; recorded as the equivalent CMD.MOVE to 8000,4900 (same destination as select_commander). Selection is UI-side in Recoil; traces mark the ordered commander as sel. Build command ids are -UnitDef.id and differ across engines; compare by def name and world x/z. Pixels stay self-only.

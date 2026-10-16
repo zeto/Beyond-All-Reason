@@ -1325,26 +1325,35 @@ deferred.
 
 `check_m7select.sh`, `check_m7build.sh`, `check_m7minimap.sh`,
 `check_m7hud.sh`, and `check_m7window.sh` exited 0 on engine shots and
-JSON. `gate --suite m7` is the official M7 self gate: it scores those
-recorded outs (selection/move, build+place, minimap click-to-move,
-health/range/tooltip, Retina window and top bar) with strict tolerances
-and exits nonzero on failure. It is self-only; no Recoil HUD/oracle
-trace is pinned, so no invented Recoil comparison is applied. `gate
---suite m7` exited 0. The same binary re-ran the corpus: `gate --suite
-m2`, `gate --suite m3`, `gate --suite m5laser`, `gate --suite m6ai`,
-`gate --suite pve`, and `gate --suite m7` exited 0, and `gate --suite
-ai_10min` was last and exited 0. Frame 18000 had 116 units, both
-armcoms, mex income 6.9099 and 6.9006, winner none.
+JSON. `gate --suite m7` exited 0.
 
-This gate does not compare HUD pixels to Recoil. m1 stays red without
-reference pictures. The M4 milestone stays red until a Recoil trace
-matches `eco_t1`, `build_tank`, and `reclaim` at 2%. The M5 milestone
-stays red until the duel corpus is within 15% time to kill of a Recoil
-trace. The M6 milestone stays red until a Recoil trace shows the
+Oracle-verified (Recoil 2026.07.04 traces under `oracle/traces/`):
+`select_commander` (CMD.MOVE 10 to 8000,4900; frame-60 position within
+`m7_mmap_slop`), `build_mex` (armmex at 7416,4888 with nano; compared by
+def+xz because `-UnitDef.id` is -158 in Recoil vs -13 in bar-metal),
+`minimap_move` (Recoil has no minimap click; recorded equivalent CMD.MOVE
+to 8000,4900; bar-metal click world within `m7_mmap_slop`),
+`health_range` (health 1850/3700, maxWeaponRange 300 within slop).
+
+Self-only (no Recoil pixel/HUD framebuffer oracle): top-bar text/wind/
+counter/income glyphs, orange range ring spread, tooltip pixels, Retina
+drawable and top-bar rows, magenta-free shots.
+
+The same binary re-ran the corpus: `gate --suite m2`, `gate --suite m3`,
+`gate --suite m5laser`, `gate --suite m6ai`, `gate --suite pve`, and
+`gate --suite m7` exited 0, and `gate --suite ai_10min` was last and
+exited 0. Frame 18000 had 116 units, both armcoms, mex income 6.9099 and
+6.9006, winner none.
+
+m1 stays red without reference pictures. The M4 milestone stays red until
+a Recoil trace matches `eco_t1`, `build_tank`, and `reclaim` at 2%. The M5
+milestone stays red until the duel corpus is within 15% time to kill of a
+Recoil trace. The M6 milestone stays red until a Recoil trace shows the
 10-minute resource totals within 15%.
 
 Directories: `native/ui`, `native/lua/gl`, `native/rhi/metal4`,
-`native/shell`, `native/tools/gate`, `native/tools/check_m7*.sh`.
+`native/shell`, `native/tools/gate`, `native/tools/check_m7*.sh`,
+`native/oracle/recoil`, `native/oracle/traces`.
 
 Do not rewrite: the closed weapon formulas, the LOS path, the wreck
 path, the team tick, or the stock game tree. Do not draw projectiles,

@@ -8833,8 +8833,8 @@ void ppm_pixel(const std::vector<uint8_t>& rgb, int w, int h, int x, int y, int&
 bool log_has(const std::string& log, const char* needle) { return log.find(needle) != std::string::npos; }
 
 int gate_m7(const Options& options) {
-    // Self-only: no Recoil HUD/oracle traces exist for M7. Checks bar-metal outs from
-    // check_m7select/build/minimap/hud/window under native/oracle/out/m7*.
+    // Mixed: Recoil traces under oracle/traces/ for sim-side select/build/minimap/health;
+    // pixel/top-bar/ring/tooltip/Retina checks stay self-only.
     const std::string tolerance_path = options.oracle + "/tolerances.toml";
     std::string tolerance_text;
     double build_x = 0, build_z = 0, build_slop = 0;
@@ -8870,8 +8870,47 @@ int gate_m7(const Options& options) {
     failure << "Scenario: m7select / m7build / m7minimap / m7hud / m7window\n\n";
     failure << "Entity: Armada commander HUD on Supreme Isthmus\n\n";
     failure << "Field: selection, build menu, minimap move, health/range/tooltip, Retina top bar\n\n";
-    failure << "Self-only: no Recoil HUD/oracle trace is pinned for M7. This suite scores engine "
-               "JSON and framebuffer shots from the check_m7* runs.\n\n";
+    failure << "Oracle: Recoil traces select_commander, build_mex, minimap_move (equivalent "
+               "CMD.MOVE), health_range. Pixel/top-bar/ring/tooltip/Retina shots stay self-only.\n\n";
+
+    auto load_jsonl = [](const std::string& path, std::vector<std::string>& lines) {
+        std::ifstream in(path);
+        if (!in) {
+            return false;
+        }
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty()) {
+                lines.push_back(line);
+            }
+        }
+        return !lines.empty();
+    };
+    auto line_at_frame = [](const std::vector<std::string>& lines, int frame) -> const std::string* {
+        for (const auto& line : lines) {
+            double f = -1;
+            if (json_number_field(line, "f", f) && static_cast<int>(f) == frame) {
+                return &line;
+            }
+        }
+        return nullptr;
+    };
+    auto unit_xz = [](const std::string& line, double& x, double& z) {
+        const auto units = line.find("\"units\"");
+        if (units == std::string::npos) {
+            return false;
+        }
+        const auto open = line.find('{', units);
+        if (open == std::string::npos) {
+            return false;
+        }
+        return json_number_field(line.substr(open), "x", x) && json_number_field(line.substr(open), "z", z);
+    };
+    auto dist2 = [](double ax, double az, double bx, double bz) {
+        const double dx = ax - bx;
+        const double dz = az - bz;
+        return std::sqrt(dx * dx + dz * dz);
+    };
 
     auto fail_write = [&](int code) {
         std::ofstream packet(options.oracle + "/last_failure.md");
@@ -8892,11 +8931,18 @@ int gate_m7(const Options& options) {
     const bool select_log_ok =
         select_ok && log_has(select_log, "select box") && log_has(select_log, "ids 1") &&
         log_has(select_log, "order move 8000 4900 unit 1");
-    double sim_x = 0;
+    double sim_x = 0, sim_z = 4900;
     {
         const auto at = select_log.find("sim frame 60 at ");
         if (at != std::string::npos) {
-            sim_x = std::strtod(select_log.c_str() + at + 16, nullptr);
+            char* end = nullptr;
+            sim_x = std::strtod(select_log.c_str() + at + 16, &end);
+            if (end != nullptr) {
+                std::strtod(end, &end);  // skip y
+                if (end != nullptr) {
+                    sim_z = std::strtod(end, nullptr);
+                }
+            }
         }
     }
     const bool moved_ok = sim_x > 7605.0;
@@ -8905,6 +8951,46 @@ int gate_m7(const Options& options) {
     if (!select_ok || !cursor_ok || !cmd_ok || !sel_ok || !select_log_ok || !moved_ok) {
         failure << "Selection failed. Need cursormove, cmd 10, sel [1], move to 8000 4900, sim_x > 7605.\n\n";
         std::cout << "m7 FAIL select\n";
+        return fail_write(1);
+    }
+
+    // --- selection oracle (select_commander) ---
+    std::vector<std::string> select_oracle;
+    const bool select_oracle_ok = load_jsonl(options.oracle + "/traces/select_commander.jsonl", select_oracle);
+    bool select_oracle_match = false;
+    double oracle_cmd = 0, oracle_px = 0, oracle_pz = 0, oracle_x60 = 0, oracle_z60 = 0;
+    if (select_oracle_ok) {
+        for (const auto& line : select_oracle) {
+            double c = 0;
+            if (json_number_field(line, "cmd", c) && static_cast<int>(c) == 10) {
+                oracle_cmd = c;
+                const auto params = line.find("\"params\":[");
+                if (params != std::string::npos) {
+                    oracle_px = std::strtod(line.c_str() + params + 10, nullptr);
+                    const auto comma = line.find(',', params + 10);
+                    const auto comma2 = comma == std::string::npos ? std::string::npos : line.find(',', comma + 1);
+                    if (comma2 != std::string::npos) {
+                        oracle_pz = std::strtod(line.c_str() + comma2 + 1, nullptr);
+                    }
+                }
+            }
+        }
+        if (const auto* at60 = line_at_frame(select_oracle, 60)) {
+            unit_xz(*at60, oracle_x60, oracle_z60);
+        }
+        const bool params_ok =
+            std::fabs(oracle_px - mmap_x) <= mmap_slop && std::fabs(oracle_pz - mmap_z) <= mmap_slop;
+        const bool pos_ok = dist2(sim_x, sim_z, oracle_x60, oracle_z60) <= mmap_slop;
+        select_oracle_match = params_ok && pos_ok && static_cast<int>(oracle_cmd) == 10;
+        std::cout << "oracle select cmd " << static_cast<int>(oracle_cmd) << " params " << oracle_px << " "
+                  << oracle_pz << " recoil60 " << oracle_x60 << " " << oracle_z60 << " dist "
+                  << dist2(sim_x, sim_z, oracle_x60, oracle_z60) << (select_oracle_match ? " match\n" : " FAIL\n");
+    } else {
+        std::cout << "oracle select FAIL trace missing\n";
+    }
+    if (!select_oracle_ok || !select_oracle_match) {
+        failure << "Oracle select_commander mismatch within " << mmap_slop << " elmos.\n\n";
+        std::cout << "m7 FAIL oracle-select\n";
         return fail_write(1);
     }
 
@@ -8932,6 +9018,52 @@ int gate_m7(const Options& options) {
         return fail_write(1);
     }
 
+    // --- build oracle (build_mex); compare def+xz (UnitDef ids differ across engines) ---
+    std::vector<std::string> build_oracle;
+    const bool build_oracle_ok = load_jsonl(options.oracle + "/traces/build_mex.jsonl", build_oracle);
+    bool build_oracle_match = false;
+    double oracle_bx = 0, oracle_bz = 0, oracle_bcmd = 0;
+    std::string oracle_bdef;
+    bool oracle_has_nano = false;
+    if (build_oracle_ok) {
+        for (const auto& line : build_oracle) {
+            const auto build_at = line.find("\"build\":{");
+            if (build_at == std::string::npos) {
+                continue;
+            }
+            const std::string build_obj = line.substr(build_at + 8);
+            std::string def;
+            double ox = 0, oz = 0, oc = 0, obuilding = 0;
+            if (json_string_field(build_obj, "def", def) && json_number_field(build_obj, "x", ox) &&
+                json_number_field(build_obj, "z", oz)) {
+                oracle_bdef = def;
+                oracle_bx = ox;
+                oracle_bz = oz;
+                json_number_field(build_obj, "cmd", oc);
+                oracle_bcmd = oc;
+                if (json_number_field(build_obj, "building", obuilding) && obuilding > 0) {
+                    oracle_has_nano = true;
+                }
+            }
+        }
+        build_oracle_match = oracle_bdef == "armmex" && std::fabs(oracle_bx - bx) <= build_slop &&
+                             std::fabs(oracle_bz - bz) <= build_slop && oracle_has_nano;
+        std::cout << "oracle build " << oracle_bdef << " at " << oracle_bx << " " << oracle_bz << " cmd "
+                  << static_cast<int>(oracle_bcmd) << " nano " << (oracle_has_nano ? "yes" : "no")
+                  << (build_oracle_match ? " match\n" : " FAIL\n");
+        if (static_cast<int>(oracle_bcmd) != static_cast<int>(bcmd)) {
+            std::cout << "oracle build note: Recoil cmd " << static_cast<int>(oracle_bcmd) << " vs bar-metal "
+                      << static_cast<int>(bcmd) << " (-UnitDef.id differs; compared by def+xz)\n";
+        }
+    } else {
+        std::cout << "oracle build FAIL trace missing\n";
+    }
+    if (!build_oracle_ok || !build_oracle_match) {
+        failure << "Oracle build_mex mismatch within " << build_slop << ".\n\n";
+        std::cout << "m7 FAIL oracle-build\n";
+        return fail_write(1);
+    }
+
     // --- minimap ---
     std::string mmap_txt, mmap_log;
     const bool mmap_ok = read_text(options.actual + "/m7minimap/minimap.json", mmap_txt) &&
@@ -8950,6 +9082,39 @@ int gate_m7(const Options& options) {
     if (!mmap_ok || !geo_ok || !move_ok || !mmap_log_ok) {
         failure << "Minimap failed. Need slave geometry and click near " << mmap_x << "," << mmap_z << ".\n\n";
         std::cout << "m7 FAIL minimap\n";
+        return fail_write(1);
+    }
+
+    // --- minimap oracle (equivalent CMD.MOVE; Recoil has no minimap click) ---
+    std::vector<std::string> mmap_oracle;
+    const bool mmap_oracle_ok = load_jsonl(options.oracle + "/traces/minimap_move.jsonl", mmap_oracle);
+    bool mmap_oracle_match = false;
+    double mopx = 0, mopz = 0;
+    if (mmap_oracle_ok) {
+        for (const auto& line : mmap_oracle) {
+            double c = 0;
+            if (json_number_field(line, "cmd", c) && static_cast<int>(c) == 10) {
+                const auto params = line.find("\"params\":[");
+                if (params != std::string::npos) {
+                    mopx = std::strtod(line.c_str() + params + 10, nullptr);
+                    const auto comma = line.find(',', params + 10);
+                    const auto comma2 = comma == std::string::npos ? std::string::npos : line.find(',', comma + 1);
+                    if (comma2 != std::string::npos) {
+                        mopz = std::strtod(line.c_str() + comma2 + 1, nullptr);
+                    }
+                }
+            }
+        }
+        mmap_oracle_match = std::fabs(mopx - mmap_x) <= mmap_slop && std::fabs(mopz - mmap_z) <= mmap_slop &&
+                            dist2(wx, wz, mopx, mopz) <= mmap_slop;
+        std::cout << "oracle minimap equiv MOVE " << mopx << " " << mopz << " vs click " << wx << " " << wz
+                  << (mmap_oracle_match ? " match\n" : " FAIL\n");
+    } else {
+        std::cout << "oracle minimap FAIL trace missing\n";
+    }
+    if (!mmap_oracle_ok || !mmap_oracle_match) {
+        failure << "Oracle minimap_move mismatch (Recoil equivalent CMD.MOVE) within " << mmap_slop << ".\n\n";
+        std::cout << "m7 FAIL oracle-minimap\n";
         return fail_write(1);
     }
 
@@ -8977,6 +9142,34 @@ int gate_m7(const Options& options) {
     if (!hud_ok || !tip_ok || !hp_ok || !range_ok || !frac_ok || !hud_log_ok) {
         failure << "HUD status failed. Need armcom tip, half health, range " << range << ".\n\n";
         std::cout << "m7 FAIL hud\n";
+        return fail_write(1);
+    }
+
+    // --- health oracle (health_range); pixels stay self-only ---
+    std::vector<std::string> health_oracle;
+    const bool health_oracle_ok = load_jsonl(options.oracle + "/traces/health_range.jsonl", health_oracle);
+    bool health_oracle_match = false;
+    double oh = 0, omh = 0, oracle_range = 0;
+    if (health_oracle_ok) {
+        const std::string* sample = line_at_frame(health_oracle, 60);
+        if (sample == nullptr) {
+            sample = line_at_frame(health_oracle, 35);
+        }
+        if (sample != nullptr) {
+            json_number_field(*sample, "health", oh);
+            json_number_field(*sample, "maxHealth", omh);
+            json_number_field(*sample, "range", oracle_range);
+        }
+        health_oracle_match = std::fabs(oh - health) <= health_slop && std::fabs(omh - max_health) <= health_slop &&
+                              std::fabs(oracle_range - hud_range) <= range_slop;
+        std::cout << "oracle health " << oh << "/" << omh << " range " << oracle_range
+                  << (health_oracle_match ? " match\n" : " FAIL\n");
+    } else {
+        std::cout << "oracle health FAIL trace missing\n";
+    }
+    if (!health_oracle_ok || !health_oracle_match) {
+        failure << "Oracle health_range mismatch within health/range slop.\n\n";
+        std::cout << "m7 FAIL oracle-health\n";
         return fail_write(1);
     }
 
@@ -9225,7 +9418,8 @@ int gate_m7(const Options& options) {
 
     failure << "Selection cursormove cmd 10 sel [1], build armmex at " << build_x << "," << build_z
             << ", minimap move near " << mmap_x << "," << mmap_z << ", HUD armcom half-health range " << range
-            << ", Retina " << dw << "x" << dh << ". Self-only (no Recoil HUD trace).\n\n";
+            << ", Retina " << dw << "x" << dh
+            << ". Oracle: select_commander/build_mex/minimap_move/health_range matched; pixels self-only.\n\n";
     failure << "The m7 self-check passed on engine output from check_m7*. No Recoil HUD oracle is pinned. m1 stays "
                "red without reference pictures. The M4/M5/M6 milestones stay red until their Recoil traces exist.\n";
     std::ofstream passed(options.oracle + "/last_failure.md");

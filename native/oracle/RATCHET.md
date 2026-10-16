@@ -418,16 +418,17 @@ income 6.9099 and 6.9006, still above the same 0.01 floor, with both
 armcoms present. No floor moved. No Recoil resource trace was added.
 The M4 2% bar and the M5 15% time-to-kill bar have not moved.
 
-M7 introduced its own bar from the official `gate --suite m7` self gate
-(no Recoil HUD trace). End-frame top-bar text coverage stays at least 40
-lit non-chrome pixels. Wind and counter pods need at least 20 and 8 lit
-glyph pixels. Income red/green glyphs need at least 20 colored pixels
-and an edge count of at least half that (crisp outline, not a same-color
-blob). Selection keeps sel [1], cursor cursormove, cmd 10. Build keeps
-armmex at 7416, 4888 with a live nano id. Minimap click stays within 250
-elmos of 8000, 4900. HUD hover stays armcom at half health with range
-300; the orange ring count stays between 800 and 30000 with median
-radius above 100. Retina drawable stays at least 2800x1700; topbar grey
-rows stay within 10% of height; panel stability mean_diff stays under
-25. Magenta tiles stay 0. The ai_10min floors did not move. Those numbers
-have not moved.
+M7 introduced its own bar from the official `gate --suite m7` gate with
+Recoil traces on PIN 2026.07.04. Oracle-verified: select_commander
+CMD.MOVE params 8000,4900 and frame-60 position within m7_mmap_slop 250;
+build_mex armmex at 7416,4888 with a live nano within m7_build_slop 1
+(command ids differ by UnitDef table: Recoil -158 vs bar-metal -13);
+minimap_move as equivalent CMD.MOVE (no Recoil minimap click) within
+m7_mmap_slop; health_range health 1850/3700 and maxWeaponRange 300 within
+m7_health_slop 1 and m7_range_slop 1. Self-only pixels: top-bar text
+coverage at least 40, wind/counter pods at least 20/8 lit glyphs, income
+at least 20 colored with edge count at least half, orange ring 800..30000
+with median radius above 100, tooltip hits at least 30, Retina drawable
+at least 2800x1700, topbar grey rows within 10% of height, panel
+stability mean_diff under 25, magenta tiles 0. The ai_10min floors did
+not move. Those numbers have not moved.
