@@ -92,17 +92,94 @@ bool read_vec3(lua_State* state, float out[3]) {
     return true;
 }
 
+bool read_number(lua_State* state, const char* key, float& out) {
+    lua_getfield(state, -1, key);
+    const bool ok = lua_isnumber(state, -1) != 0;
+    if (ok) {
+        out = static_cast<float>(lua_tonumber(state, -1));
+    }
+    lua_pop(state, 1);
+    return ok;
+}
+
+bool read_string(lua_State* state, const char* key, std::string& out) {
+    lua_getfield(state, -1, key);
+    const bool ok = lua_type(state, -1) == LUA_TSTRING;
+    if (ok) {
+        out = lua_tostring(state, -1);
+    }
+    lua_pop(state, 1);
+    return ok;
+}
+
+bool read_field_vec3(lua_State* state, const char* key, float out[3]) {
+    lua_getfield(state, -1, key);
+    const bool ok = read_vec3(state, out);
+    lua_pop(state, 1);
+    return ok;
+}
+
+// LuaTable::GetBool: booleans, or numbers where nonzero is true.
+bool read_bool(lua_State* state, const char* key, bool& out) {
+    lua_getfield(state, -1, key);
+    bool ok = true;
+    if (lua_isboolean(state, -1)) {
+        out = lua_toboolean(state, -1) != 0;
+    } else if (lua_isnumber(state, -1)) {
+        out = lua_tonumber(state, -1) != 0;
+    } else {
+        ok = false;
+    }
+    lua_pop(state, 1);
+    return ok;
+}
+
+bool read_vec4(lua_State* state, const char* key, float out[4]) {
+    lua_getfield(state, -1, key);
+    bool ok = lua_istable(state, -1);
+    float tmp[4];
+    for (int i = 1; ok && i <= 4; ++i) {
+        lua_rawgeti(state, -1, i);
+        ok = lua_isnumber(state, -1) != 0;
+        if (ok) {
+            tmp[i - 1] = static_cast<float>(lua_tonumber(state, -1));
+        }
+        lua_pop(state, 1);
+    }
+    lua_pop(state, 1);
+    if (ok) {
+        std::memcpy(out, tmp, sizeof(tmp));
+    }
+    return ok;
+}
+
 struct MapInfo {
     std::string smf_path;
     float min_height = 0;
     float max_height = 0;
     bool has_height = false;
-    float sun[3] = {-0.64f, 0.66f, -0.57f};
-    float ambient[3] = {0.35f, 0.35f, 0.35f};
-    float diffuse[3] = {1.2f, 1.2f, 1.2f};
+    // Recoil CMapInfo::ReadLight defaults.
+    float sun[3] = {0.f, 1.f, 2.f};
+    float ambient[3] = {0.5f, 0.5f, 0.5f};
+    float diffuse[3] = {0.5f, 0.5f, 0.5f};
+    float specular[3] = {0.1f, 0.1f, 0.1f};
+    float specular_exponent = 100.f;
+    float unit_ambient[3] = {0.4f, 0.4f, 0.4f};
+    float unit_diffuse[3] = {0.7f, 0.7f, 0.7f};
+    float unit_specular[3] = {0.7f, 0.7f, 0.7f};
     float sky[3] = {0.43f, 0.58f, 0.64f};
+    std::string sky_box;
     float ground_shadow_density = 0.8f;
     float unit_shadow_density = 0.8f;
+    std::vector<std::string> smt_files;
+    std::string specular_tex;
+    std::string splat_distr_tex;
+    std::string blend_normals_tex;
+    std::vector<std::string> splat_normal_tex;
+    bool splat_diffuse_alpha = false;
+    float splat_scales[4] = {0.02f, 0.02f, 0.02f, 0.02f};
+    float splat_mults[4] = {1.f, 1.f, 1.f, 1.f};
+    TerrainMesh::Water water;
     // Spring uses 100 when a map omits extractorRadius. Recoil's maxMetal default is 0.02.
     float extractor_radius = 100.f;
     float max_metal = 0.02f;
@@ -163,6 +240,13 @@ bool read_mapinfo(const std::vector<uint8_t>& bytes, MapInfo& info, std::string&
             info.max_height = max_height;
             info.has_height = true;
         }
+        for (int i = 0;; ++i) {
+            std::string name;
+            if (!read_string(state, ("smtfilename" + std::to_string(i)).c_str(), name)) {
+                break;
+            }
+            info.smt_files.push_back(name);
+        }
     }
     lua_pop(state, 1);
 
@@ -170,6 +254,11 @@ bool read_mapinfo(const std::vector<uint8_t>& bytes, MapInfo& info, std::string&
     if (lua_istable(state, -1)) {
         lua_getfield(state, -1, "skycolor");
         read_vec3(state, info.sky);
+        lua_pop(state, 1);
+        lua_getfield(state, -1, "skybox");
+        if (lua_isstring(state, -1)) {
+            info.sky_box = lua_tostring(state, -1);
+        }
         lua_pop(state, 1);
         // mapinfo.lua lowercases nested keys too. Recoil's names are minWind and maxWind.
         lua_getfield(state, -1, "minwind");
@@ -199,6 +288,14 @@ bool read_mapinfo(const std::vector<uint8_t>& bytes, MapInfo& info, std::string&
         read_vec3(state, info.diffuse);
         lua_pop(state, 1);
         // Recoil MapInfo: groundShadowDensity / unitShadowDensity, default 0.8, clamped to [0, 1].
+        read_field_vec3(state, "groundspecularcolor", info.specular);
+        read_number(state, "specularexponent", info.specular_exponent);
+        read_field_vec3(state, "unitambientcolor", info.unit_ambient);
+        // Recoil: unitSpecularColor defaults to the (possibly map-set) unitDiffuseColor.
+        if (read_field_vec3(state, "unitdiffusecolor", info.unit_diffuse)) {
+            std::memcpy(info.unit_specular, info.unit_diffuse, sizeof(info.unit_specular));
+        }
+        read_field_vec3(state, "unitspecularcolor", info.unit_specular);
         lua_getfield(state, -1, "groundshadowdensity");
         if (lua_isnumber(state, -1)) {
             info.ground_shadow_density = static_cast<float>(lua_tonumber(state, -1));
@@ -209,6 +306,64 @@ bool read_mapinfo(const std::vector<uint8_t>& bytes, MapInfo& info, std::string&
             info.unit_shadow_density = static_cast<float>(lua_tonumber(state, -1));
         }
         lua_pop(state, 1);
+    }
+    lua_pop(state, 1);
+
+    lua_getfield(state, -1, "resources");
+    if (lua_istable(state, -1)) {
+        read_string(state, "speculartex", info.specular_tex);
+        read_string(state, "splatdistrtex", info.splat_distr_tex);
+        read_string(state, "detailnormaltex", info.blend_normals_tex);
+        // Recoil ReadSMF: a splatDetailNormalTex sub-table wins over the flat keys.
+        lua_getfield(state, -1, "splatdetailnormaltex");
+        if (lua_istable(state, -1)) {
+            read_bool(state, "alpha", info.splat_diffuse_alpha);
+            for (int i = 1;; ++i) {
+                lua_rawgeti(state, -1, i);
+                const bool ok = lua_type(state, -1) == LUA_TSTRING;
+                if (ok) {
+                    info.splat_normal_tex.push_back(lua_tostring(state, -1));
+                }
+                lua_pop(state, 1);
+                if (!ok) {
+                    break;
+                }
+            }
+            lua_pop(state, 1);
+        } else {
+            lua_pop(state, 1);
+            read_bool(state, "splatdetailnormaldiffusealpha", info.splat_diffuse_alpha);
+            for (int i = 1;; ++i) {
+                std::string name;
+                if (!read_string(state, ("splatdetailnormaltex" + std::to_string(i)).c_str(), name)) {
+                    break;
+                }
+                info.splat_normal_tex.push_back(name);
+            }
+        }
+    }
+    lua_pop(state, 1);
+
+    lua_getfield(state, -1, "splats");
+    if (lua_istable(state, -1)) {
+        read_vec4(state, "texscales", info.splat_scales);
+        read_vec4(state, "texmults", info.splat_mults);
+    }
+    lua_pop(state, 1);
+
+    lua_getfield(state, -1, "water");
+    if (lua_istable(state, -1)) {
+        TerrainMesh::Water& w = info.water;
+        read_number(state, "repeatx", w.repeat_x);
+        read_number(state, "repeaty", w.repeat_y);
+        read_field_vec3(state, "absorb", w.absorb);
+        read_field_vec3(state, "basecolor", w.base_color);
+        read_field_vec3(state, "mincolor", w.min_color);
+        // Recoil: hasWaterPlane is "planeColor exists".
+        w.has_water_plane = read_field_vec3(state, "planecolor", w.plane_color);
+        read_field_vec3(state, "surfacecolor", w.surface_color);
+        read_number(state, "surfacealpha", w.surface_alpha);
+        read_string(state, "texture", w.texture);
     }
     lua_pop(state, 1);
 
@@ -613,6 +768,20 @@ bool build_mesh(const std::vector<uint8_t>& smf, const MapInfo& info, TerrainMes
     std::memcpy(mesh.ambient, info.ambient, sizeof(mesh.ambient));
     std::memcpy(mesh.diffuse, info.diffuse, sizeof(mesh.diffuse));
     std::memcpy(mesh.sky, info.sky, sizeof(mesh.sky));
+    mesh.sky_box = info.sky_box;
+    std::memcpy(mesh.specular, info.specular, sizeof(mesh.specular));
+    mesh.specular_exponent = info.specular_exponent;
+    std::memcpy(mesh.unit_ambient, info.unit_ambient, sizeof(mesh.unit_ambient));
+    std::memcpy(mesh.unit_diffuse, info.unit_diffuse, sizeof(mesh.unit_diffuse));
+    std::memcpy(mesh.unit_specular, info.unit_specular, sizeof(mesh.unit_specular));
+    mesh.specular_tex = info.specular_tex;
+    mesh.splat_distr_tex = info.splat_distr_tex;
+    mesh.blend_normals_tex = info.blend_normals_tex;
+    mesh.splat_normal_tex = info.splat_normal_tex;
+    mesh.splat_diffuse_alpha = info.splat_diffuse_alpha;
+    std::memcpy(mesh.splat_scales, info.splat_scales, sizeof(mesh.splat_scales));
+    std::memcpy(mesh.splat_mults, info.splat_mults, sizeof(mesh.splat_mults));
+    mesh.water = info.water;
     mesh.ground_shadow_density = std::clamp(info.ground_shadow_density, 0.f, 1.f);
     mesh.unit_shadow_density = std::clamp(info.unit_shadow_density, 0.f, 1.f);
     mesh.starts = info.starts;
@@ -655,6 +824,89 @@ bool build_mesh(const std::vector<uint8_t>& smf, const MapInfo& info, TerrainMes
             vertex.mv = vertex.v;
         }
     }
+    // Recoil SMFShadingTextureFragProg CalcFragmentNormal: the sum of the eight
+    // fan cross products around each heightmap vertex, stored as RG16F (x, z).
+    mesh.normals_xz.resize(static_cast<size_t>(map_x + 1) * (map_y + 1) * 2);
+    {
+        auto vertex = [&](int x, int z, float out[3]) {
+            x = std::clamp(x, 0, map_x);
+            z = std::clamp(z, 0, map_y);
+            out[0] = static_cast<float>(x * square_size);
+            out[1] = sample(x, z);
+            out[2] = static_cast<float>(z * square_size);
+        };
+        auto cross_add = [](const float a[3], const float b[3], float n[3]) {
+            n[0] += a[1] * b[2] - a[2] * b[1];
+            n[1] += a[2] * b[0] - a[0] * b[2];
+            n[2] += a[0] * b[1] - a[1] * b[0];
+        };
+        for (int z = 0; z <= map_y; ++z) {
+            for (int x = 0; x <= map_x; ++x) {
+                float mm[3];
+                vertex(x, z, mm);
+                // Ring order bl bm br ml mr tl tm tr, with t = +z.
+                const int offsets[8][2] = {{-1, -1}, {0, -1}, {1, -1}, {-1, 0}, {1, 0}, {-1, 1}, {0, 1}, {1, 1}};
+                float v[8][3];
+                for (int i = 0; i < 8; ++i) {
+                    vertex(x + offsets[i][0], z + offsets[i][1], v[i]);
+                    v[i][0] -= mm[0];
+                    v[i][1] -= mm[1];
+                    v[i][2] -= mm[2];
+                }
+                enum { BL, BM, BR, ML, MR, TL, TM, TR };
+                float n[3] = {0, 0, 0};
+                cross_add(v[TR], v[MR], n);
+                cross_add(v[MR], v[BR], n);
+                cross_add(v[BR], v[BM], n);
+                cross_add(v[BM], v[BL], n);
+                cross_add(v[BL], v[ML], n);
+                cross_add(v[ML], v[TL], n);
+                cross_add(v[TL], v[TM], n);
+                cross_add(v[TM], v[TR], n);
+                normalize(n[0], n[1], n[2]);
+                const size_t at = (static_cast<size_t>(z) * (map_x + 1) + x) * 2;
+                const _Float16 hx = static_cast<_Float16>(n[0]);
+                const _Float16 hz = static_cast<_Float16>(n[2]);
+                std::memcpy(&mesh.normals_xz[at], &hx, 2);
+                std::memcpy(&mesh.normals_xz[at + 1], &hz, 2);
+            }
+        }
+    }
+
+    // SMF tile section: MapTileHeader {numTileFiles, numTiles}, then per file
+    // {int count, NUL-terminated name}, then one int per 4x4 heightmap squares.
+    {
+        const int tiles_ptr = read_i32(smf.data() + 60);
+        mesh.tile_grid_x = map_x / 4;
+        mesh.tile_grid_y = map_y / 4;
+        size_t at = static_cast<size_t>(tiles_ptr);
+        if (tiles_ptr > 0 && at + 8 <= smf.size()) {
+            const int file_count = read_i32(smf.data() + at);
+            at += 8;
+            for (int f = 0; f < file_count && at + 4 <= smf.size(); ++f) {
+                const int count = read_i32(smf.data() + at);
+                at += 4;
+                std::string name;
+                while (at < smf.size() && smf[at] != 0) {
+                    name.push_back(static_cast<char>(smf[at++]));
+                }
+                ++at;
+                mesh.tile_files.push_back(name);
+                mesh.tile_file_counts.push_back(count);
+            }
+            const size_t cells = static_cast<size_t>(mesh.tile_grid_x) * mesh.tile_grid_y;
+            if (at + cells * 4 <= smf.size()) {
+                mesh.tile_index.resize(cells);
+                std::memcpy(mesh.tile_index.data(), smf.data() + at, cells * 4);
+            }
+            // Recoil CSMFGroundTextures: mapinfo smtFileName%i replaces the SMF's names in order.
+            // Only when the counts agree; names resolve against the SMF's directory first.
+            if (!info.smt_files.empty() && info.smt_files.size() == mesh.tile_files.size()) {
+                mesh.tile_files = info.smt_files;
+            }
+        }
+    }
+
     mesh.center_height = sample(map_x / 2, map_y / 2);
     mesh.corner_height = sample(0, 0);
 
@@ -810,6 +1062,7 @@ bool load_terrain(const std::string& archive_path, TerrainMesh& mesh, std::strin
     if (!Archive::read_file(archive_path, info.smf_path, smf, error)) {
         return false;
     }
+    mesh.archive_path = archive_path;
     return build_mesh(smf, info, mesh, error);
 }
 

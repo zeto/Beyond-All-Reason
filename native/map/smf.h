@@ -58,14 +58,59 @@ struct TerrainMesh {
     float max_wind = 25.f;
     // Map gravity in elmos per frame squared. Negative is down. The tag default is 130.
     float gravity = -130.f / 900.f;
-    float sun[3] = {-0.64f, 0.66f, -0.57f};
-    float ambient[3] = {0.35f, 0.35f, 0.35f};
-    float diffuse[3] = {1.2f, 1.2f, 1.2f};
+    // mapinfo lighting, Recoil CMapInfo::ReadLight defaults when a key is absent.
+    float sun[3] = {0.f, 1.f, 2.f};
+    float ambient[3] = {0.5f, 0.5f, 0.5f};
+    float diffuse[3] = {0.5f, 0.5f, 0.5f};
+    float specular[3] = {0.1f, 0.1f, 0.1f};
+    float specular_exponent = 100.f;
+    float unit_ambient[3] = {0.4f, 0.4f, 0.4f};
+    float unit_diffuse[3] = {0.7f, 0.7f, 0.7f};
+    float unit_specular[3] = {0.7f, 0.7f, 0.7f};
     float sky[3] = {0.43f, 0.58f, 0.64f};
+    // atmosphere.skyBox (Recoil loads "maps/" + name). Empty when the map has none.
+    std::string sky_box;
     // mapinfo lighting groundShadowDensity / unitShadowDensity (Recoil default 0.8, clamped 0..1).
     float ground_shadow_density = 0.8f;
     float unit_shadow_density = 0.8f;
     std::vector<MapStart> starts;
+
+    // Archive the map came from; terrain textures are read from it lazily.
+    std::string archive_path;
+    // SMF tile index: one tile per 4x4 heightmap squares (32 px of 1024-per-bigsquare diffuse).
+    std::vector<int32_t> tile_index;
+    int tile_grid_x = 0;
+    int tile_grid_y = 0;
+    // SMT files in tile order and how many tiles each holds (mapinfo smtFileName%i overrides names).
+    std::vector<std::string> tile_files;
+    std::vector<int> tile_file_counts;
+    // Recoil SMFShadingTextureFragProg normal per heightmap vertex, (map_x+1)*(map_y+1) of
+    // half-float (x, z) pairs, the RG16F normalsTex.
+    std::vector<uint16_t> normals_xz;
+
+    // mapinfo resources (already resolved with Recoil's "maps/" fallback).
+    std::string specular_tex;
+    std::string splat_distr_tex;
+    std::string blend_normals_tex;
+    std::vector<std::string> splat_normal_tex;
+    bool splat_diffuse_alpha = false;
+    // mapinfo splats, Recoil defaults 0.02 and 1.
+    float splat_scales[4] = {0.02f, 0.02f, 0.02f, 0.02f};
+    float splat_mults[4] = {1.f, 1.f, 1.f, 1.f};
+
+    // mapinfo water, Recoil CMapInfo::ReadWater defaults.
+    struct Water {
+        float repeat_x = 0.f;
+        float repeat_y = 0.f;
+        float absorb[3] = {0.f, 0.f, 0.f};
+        float base_color[3] = {0.f, 0.f, 0.f};
+        float min_color[3] = {0.f, 0.f, 0.f};
+        float plane_color[3] = {0.f, 0.4f, 0.f};
+        bool has_water_plane = false;
+        float surface_color[3] = {0.75f, 0.8f, 0.85f};
+        float surface_alpha = 0.55f;
+        std::string texture;
+    } water;
 };
 
 float terrain_height_at(const TerrainMesh& mesh, float x, float z);
