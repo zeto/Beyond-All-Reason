@@ -50,6 +50,7 @@ struct Uniforms {
     float4 grass_c;
     float4 grass_u;
     float4 platter;
+    float4 los;
 };
 
 // Recoil CGlobalRendering::SMF_INTENSITY_MULT.
@@ -126,6 +127,30 @@ vertex Varying terrain_vs(uint vid [[vertex_id]],
 // SMF_DETAIL_NORMAL_DIFFUSE_ALPHA, SMF_BLEND_NORMALS, SMF_WATER_ABSORPTION, HAVE_SHADOWS.
 // Each optional define is a uniform flag set from what the map actually provides.
 // DDS maps are sampled at (u, 1 - v): Recoil loads them through nv_dds with a vertical flip.
+// LOS view. gfx_los_colors (opacity 0.66) hands Spring.SetLosViewColors
+// fog/always 0.40 * 0.66 = 0.264, los 0.60, radar 0, radar2 0.40 * lerp(0.66, 1, 0.5) = 0.332 (grey).
+// bar-metal sums them per texel into one info grey: always + los * inLos + radar2 * inRadar.
+constant float LOS_ALWAYS = 0.40 * 0.66;
+constant float LOS_LOS = 0.60;
+constant float LOS_RADAR2 = 0.40 * (0.66 + (1.0 - 0.66) * 0.5);
+
+// FITTED CONSTANTS (not from BAR or Recoil sources): the ground's LOS shade
+// = LOS_FIT_K * info + LOS_FIT_A. Least-squares line through the measured ratio
+// (headed Recoil select shot, LOS view on, Volumetric Clouds off) / (bar-metal select
+// shot before this LOS view) per coverage state: in LOS 1.159, radar only 0.417,
+// neither 0.288 (mean over ground pixels of each state). Data in ~/bar-m8-los/.
+constant float LOS_FIT_K = 0.970;
+constant float LOS_FIT_A = -0.044;
+
+float los_info(constant Uniforms& u, texture2d<float> los_tex, float2 world_xz) {
+    if (u.los.z < 0.5) {
+        return -1.0;
+    }
+    constexpr sampler los_s(coord::normalized, filter::linear, address::clamp_to_edge);
+    float2 rg = los_tex.sample(los_s, world_xz * u.los.xy).rg;
+    return LOS_ALWAYS + LOS_LOS * rg.r + LOS_RADAR2 * rg.g;
+}
+
 fragment float4 terrain_fs(Varying in [[stage_in]],
                            constant Uniforms& u [[buffer(0)]],
                            texture2d<float> diffuse_tex [[texture(0)]],
@@ -137,7 +162,8 @@ fragment float4 terrain_fs(Varying in [[stage_in]],
                            texture2d<float> splat_n1 [[texture(6)]],
                            texture2d<float> splat_n2 [[texture(7)]],
                            texture2d<float> splat_n3 [[texture(8)]],
-                           texture2d<float> splat_n4 [[texture(9)]]) {
+                           texture2d<float> splat_n4 [[texture(9)]],
+                           texture2d<float> los_tex [[texture(22)]]) {
     // Persistent square textures: LINEAR_MIPMAP_LINEAR, 4 levels, SMFTexAniso 4.
     constexpr sampler diffuse_s(coord::normalized, filter::linear, mip_filter::linear, address::clamp_to_edge,
                                 max_anisotropy(4));
@@ -221,6 +247,10 @@ fragment float4 terrain_fs(Varying in [[stage_in]],
         const float band = max(radius * 0.045, 1.2);
         const float ring = 1.0 - smoothstep(band * 0.25, band, abs(dist - radius));
         color = mix(color, u.team_color.rgb, saturate(ring) * 0.92);
+    }
+    const float info = los_info(u, los_tex, in.world_xz);
+    if (info >= 0.0) {
+        color *= LOS_FIT_K * info + LOS_FIT_A;
     }
     return float4(color, 1.0);
 }
@@ -620,7 +650,8 @@ vertex GrassOut grass_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
                          depth2d<float> shadow_map [[texture(2)]],
                          texture2d<float> perlin [[texture(19)]],
                          texture2d<float> heightmap [[texture(20)]],
-                         texture2d<float> map_color_tex [[texture(21)]]) {
+                         texture2d<float> map_color_tex [[texture(21)]],
+                         texture2d<float> los_tex [[texture(22)]]) {
     constexpr sampler lin(coord::normalized, filter::linear, mip_filter::linear, address::repeat);
     constexpr sampler clamp_s(coord::normalized, filter::linear, address::clamp_to_edge);
     constexpr sampler cmp(coord::normalized, filter::linear, address::clamp_to_edge, compare_func::less_equal);
@@ -652,7 +683,9 @@ vertex GrassOut grass_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
     const float ground = heightmap.sample(clamp_s, uvhm, level(0.0)).x;
     p.y = (vpos.y + 0.5) * blade + ground;
 
-    const float los = 1.0;
+    // Map Grass GL4: losTexSample = $info; clamp(dot(rgb, vec3(0.33)) * 1.5, 0, 1). Our info is a grey.
+    const float info = los_info(u, los_tex, p.xz);
+    const float los = info >= 0.0 ? clamp(info * 0.99 * 1.5, 0.0, 1.0) : 1.0;
 
     // SHADOWTAPS 4: the cross of four taps around the vertex.
     float shadow = 1.0;

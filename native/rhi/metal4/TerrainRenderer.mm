@@ -48,6 +48,8 @@ struct FrameSlot {
     // Draw-order runs over hud_color: image 0 is solid color, else an image_cache id.
     struct HudSeg { NSUInteger start; NSUInteger count; int image; };
     std::vector<HudSeg> hud_segments;
+    id<MTLTexture> los = nil;
+    uint32_t los_version = 0;
     uint64_t ticket = 0;
     bool pending = false;
 };
@@ -109,6 +111,8 @@ struct TerrainUniforms {
     float grass_u[4];
     // x radius (0 hides), y 1 while the unit is selected, z breathe factor.
     float platter[4];
+    // x 1 / (width * cell), y 1 / (height * cell), z 1 with the LOS view on.
+    float los[4];
 };
 
 // terrain_fs texture slots. Slot 2 is the shadow map.
@@ -117,7 +121,7 @@ enum GroundSlot { kGroundDiffuse = 0, kGroundNormals = 1, kGroundSpecular = 3, k
 // Above the ground slots: atmosphere.skyBox cube and the $reflection cube (model_fs).
 enum { kSkyCubeSlot = 10, kReflectionSlot = 11, kWaterSlot = 12, kRefractColorSlot = 13, kRefractDepthSlot = 14,
        kFoamSlot = 15, kWaveNormalSlot = 16, kCausticsSlot = 17, kGrassBladeSlot = 18, kGrassPerlinSlot = 19,
-       kGrassHeightSlot = 20, kGrassMapColorSlot = 21, kTextureSlots = 22 };
+       kGrassHeightSlot = 20, kGrassMapColorSlot = 21, kLosSlot = 22, kTextureSlots = 23 };
 // Recoil CubeTexSizeReflection default; the oracle config does not set it, and BAR's
 // api_pbr_enabler only changes the config after the cubemap exists.
 constexpr NSUInteger kReflectionSize = 128;
@@ -221,6 +225,11 @@ struct TerrainRenderer::Impl {
     float model_pose[4] = {0, 0, 0, 0};
     float marker_radius = 0;
     float platter_radius = 0;
+    std::vector<uint8_t> los_rg;
+    int los_width = 0;
+    int los_height = 0;
+    float los_cell = 0;
+    uint32_t los_version = 0;
     bool platter_selected = false;
     float bank = 0;
     bool metal_hud = false;
@@ -458,6 +467,7 @@ struct SceneBindings {
     id<MTLRenderPipelineState> ring_pipeline;
     id<MTLRenderPipelineState> platter_pipeline;
     bool platter = false;
+    id<MTLTexture> los = nil;
     id<MTLDepthStencilState> terrain_depth;
     id<MTLDepthStencilState> water_depth;
     id<MTLTexture> minimap;
@@ -880,6 +890,9 @@ void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, i
 
     // Model draws reuse texture slots 0 and 1, so terrain binds its own maps first.
     bind_ground(scene);
+    if (scene.los != nil) {
+        [scene.arguments setTexture:scene.los.gpuResourceID atIndex:kLosSlot];
+    }
     // CSkyBox::Draw before the ground.
     draw_sky(encoder, scene);
     [scene.arguments setAddress:scene.vertices.gpuAddress atIndex:1];
@@ -2348,6 +2361,20 @@ void TerrainRenderer::set_pose(float x, float y, float z, float heading, float b
     impl_->bank = bank;
 }
 
+void TerrainRenderer::set_los(const std::vector<uint8_t>& rg, int width, int height, float cell, uint32_t version) {
+    if (rg.size() != static_cast<size_t>(width) * static_cast<size_t>(height) * 2 || width <= 0 || height <= 0) {
+        impl_->los_rg.clear();
+        impl_->los_width = impl_->los_height = 0;
+        impl_->los_version = version;
+        return;
+    }
+    impl_->los_rg = rg;
+    impl_->los_width = width;
+    impl_->los_height = height;
+    impl_->los_cell = cell;
+    impl_->los_version = version;
+}
+
 void TerrainRenderer::set_platter(float radius, bool selected) {
     impl_->platter_radius = radius > 0.f ? radius : 0.f;
     impl_->platter_selected = selected;
@@ -2415,6 +2442,37 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
         // after nextDrawable left the pool empty and blocked the present thread.
         [impl_->residency commit];
     }
+    // The slot's frame has retired, so its LOS texture can be rewritten without a race.
+    if (!impl_->los_rg.empty() && (slot.los == nil || slot.los_version != impl_->los_version ||
+                                   slot.los.width != static_cast<NSUInteger>(impl_->los_width) ||
+                                   slot.los.height != static_cast<NSUInteger>(impl_->los_height))) {
+        if (slot.los == nil || slot.los.width != static_cast<NSUInteger>(impl_->los_width) ||
+            slot.los.height != static_cast<NSUInteger>(impl_->los_height)) {
+            if (slot.los != nil) {
+                [impl_->residency removeAllocation:slot.los];
+            }
+            MTLTextureDescriptor* los_desc =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG8Unorm
+                                                                   width:static_cast<NSUInteger>(impl_->los_width)
+                                                                  height:static_cast<NSUInteger>(impl_->los_height)
+                                                               mipmapped:NO];
+            los_desc.usage = MTLTextureUsageShaderRead;
+            los_desc.storageMode = MTLStorageModeShared;
+            slot.los = [impl_->device newTextureWithDescriptor:los_desc];
+            if (slot.los == nil) {
+                error = "los texture allocation failed";
+                return false;
+            }
+            [impl_->residency addAllocation:slot.los];
+            [impl_->residency commit];
+        }
+        [slot.los replaceRegion:MTLRegionMake2D(0, 0, static_cast<NSUInteger>(impl_->los_width),
+                                                static_cast<NSUInteger>(impl_->los_height))
+                    mipmapLevel:0
+                      withBytes:impl_->los_rg.data()
+                    bytesPerRow:static_cast<NSUInteger>(impl_->los_width) * 2];
+        slot.los_version = impl_->los_version;
+    }
     impl_->active = &slot;
 
     TerrainUniforms uniforms{};
@@ -2446,6 +2504,11 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     // DrawPrimitiveAtUnit ANIMATION: clamp(grow, INITIALSIZE, 1) + sin(frame / BREATHERATE 30) * BREATHESIZE 0.05.
     uniforms.platter[2] = 1.f + std::sin(static_cast<float>(frame.sim_frame) / 30.f) * 0.05f;
     uniforms.platter[3] = 0.f;
+    const bool los_view = !impl_->los_rg.empty() && impl_->los_cell > 0.f;
+    uniforms.los[0] = los_view ? 1.f / (static_cast<float>(impl_->los_width) * impl_->los_cell) : 0.f;
+    uniforms.los[1] = los_view ? 1.f / (static_cast<float>(impl_->los_height) * impl_->los_cell) : 0.f;
+    uniforms.los[2] = los_view ? 1.f : 0.f;
+    uniforms.los[3] = 0.f;
     const bool shadows = impl_->shadow_map != nil &&
                          fit_shadow(frame.view_proj, impl_->sun, impl_->height_min, impl_->height_max, uniforms.shadow_vp);
     uniforms.shadow[0] = impl_->ground_shadow_density;
@@ -2549,6 +2612,7 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
             if (!invert4(face_u.view_proj, face_u.sky_inv)) {
                 std::memset(face_u.sky_inv, 0, sizeof(face_u.sky_inv));
             }
+            face_u.los[2] = 0.f;  // CubeMapHandler faces carry no LOS view
             faces[face] = face_u;
         }
         if (!impl_->reflection_primed) {
@@ -2682,6 +2746,7 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     scene.ring_pipeline = impl_->ring_pipeline;
     scene.platter_pipeline = impl_->platter_pipeline;
     scene.platter = impl_->platter_radius > 0.f;
+    scene.los = impl_->los_rg.empty() ? nil : slot.los;
     scene.terrain_depth = impl_->terrain_depth;
     scene.water_depth = impl_->water_depth;
     scene.minimap = impl_->minimap;

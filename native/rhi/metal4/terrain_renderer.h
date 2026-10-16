@@ -42,6 +42,9 @@ public:
     // gui_selectedunits_gl4 platter (radius 0 hides it) at the unit origin, and the CUS
     // selection rim highlight on the model while selected.
     void set_platter(float radius, bool selected);
+    // Local-team LOS / radar coverage (sim/los/los_map.h), RG8 at `cell` elmos per texel
+    // (R in LOS, G in radar). An empty texture turns the LOS view off.
+    void set_los(const std::vector<uint8_t>& rg, int width, int height, float cell, uint32_t version);
     // Cyan mex rings. On for an interactive window. Off for screenshot checks.
     void set_metal_hud(bool enabled);
     void attach(void* metal_layer);

@@ -30,6 +30,7 @@
 #include "minimap.h"
 #include "hud_status.h"
 #include "unitdef.h"
+#include "los/los_map.h"
 #include "move/unit_sim.h"
 #include "smf.h"
 #include "unit_spawn.h"
@@ -77,6 +78,8 @@ struct Options {
     bool lock_camera = false;
     // Skip Map Grass GL4 (A/B timing of the grass pass).
     bool no_grass = false;
+    // The LOS view (gfx_los_view / gfx_los_colors) is on by default, as in BAR.
+    bool no_los_view = false;
     // FILE#ID: with --lock-camera, hold that bookmark camera instead of following unit 0.
     std::string fixed_camera;
     bool check_hud_text = false;
@@ -175,6 +178,8 @@ bool parse_args(int argc, char** argv, Options& options) {
             options.fixed_camera = value;
         } else if (arg == "--no-grass") {
             options.no_grass = true;
+        } else if (arg == "--no-los-view") {
+            options.no_los_view = true;
         } else if (arg == "--lock-camera") {
             options.lock_camera = true;
         } else if (arg == "--check-hud-text") {
@@ -784,6 +789,45 @@ int run_terrain(const Options& options, const std::string& game_name) {
             platter_radius = scale * 0.5f;
         }
     }
+    bar::LosMap los_map;
+    bool los_view = false;
+    uint32_t los_uploaded = 0;
+    if (!options.no_los_view) {
+        std::string los_error;
+        los_view = bar::los_map_init(options.game_root, mesh, los_map, los_error);
+        if (!los_view) {
+            std::cerr << "los: " << los_error << "\n";
+        }
+    }
+    auto update_los = [&]() {
+        if (!los_view || sim.x.empty()) {
+            return;
+        }
+        std::string los_error;
+        const int team = sim.team.empty() ? 0 : sim.team[0];
+        if (!bar::los_map_update(options.game_root, sim, mesh, team, los_map, los_error)) {
+            std::cerr << "los: " << los_error << "\n";
+            los_view = false;
+            renderer.set_los({}, 0, 0, 0, 0);
+            return;
+        }
+        if (los_map.version == los_uploaded && los_uploaded != 0) {
+            return;
+        }
+        // One texel per radar square (the finer grid): R in LOS, G in radar, sampled at texel centres.
+        std::vector<uint8_t> rg(static_cast<size_t>(los_map.radar_width) * los_map.radar_height * 2, 0);
+        for (int z = 0; z < los_map.radar_height; ++z) {
+            for (int x = 0; x < los_map.radar_width; ++x) {
+                const float wx = (static_cast<float>(x) + 0.5f) * los_map.radar_square;
+                const float wz = (static_cast<float>(z) + 0.5f) * los_map.radar_square;
+                const size_t at = (static_cast<size_t>(z) * los_map.radar_width + x) * 2;
+                rg[at] = bar::los_map_in_los(los_map, wx, wz) ? 255 : 0;
+                rg[at + 1] = los_map.radar[static_cast<size_t>(z) * los_map.radar_width + x] ? 255 : 0;
+            }
+        }
+        los_uploaded = los_map.version == 0 ? 1 : los_map.version;
+        renderer.set_los(rg, los_map.radar_width, los_map.radar_height, los_map.radar_square, los_uploaded);
+    };
     auto place_model = [&](float distance) {
         (void)distance;
         renderer.set_marker(0);
@@ -794,6 +838,7 @@ int run_terrain(const Options& options, const std::string& game_name) {
         const float bank = sim.bank.empty() ? 0.f : sim.bank[0];
         renderer.set_pose(sim.x[0], sim.y[0], sim.z[0], sim.heading[0], bank);
         upload_pieces();
+        update_los();
         const bar::SelectionSnapshot& snap = bar::selection_snapshot();
         const bool selected =
             !snap.selected.empty() &&

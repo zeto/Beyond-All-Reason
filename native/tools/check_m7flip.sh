@@ -74,8 +74,9 @@ else
   capture_bar widgets "$ROOT/native/oracle/scenarios/select_commander.input" 45
 fi
 # water: fixed "shore" bookmark camera (oracle/cameras.json), no selection.
+# The water ref runs with --los 0, so the LOS view is off here too.
 capture_bar water "$ROOT/native/oracle/scenarios/water.input" 45 \
-  --fixed-camera "$ROOT/native/oracle/cameras.json#shore"
+  --fixed-camera "$ROOT/native/oracle/cameras.json#shore" --no-los-view
 
 # --- headed Recoil reference captures ---
 capture_ref() {
@@ -114,7 +115,7 @@ capture_ref minimap --frames 260 --shotframe 200 || true
 capture_ref hud     --frames 270 --shotframe 210 --damage 0.5 || true
 capture_ref widgets --frames 260 --shotframe 200 || true
 # The shore is ~2000 elmos outside the commander's sight; BAR's LOS view would darken all of it,
-# and bar-metal draws no LOS shading, so this ref turns the LOS view off.
+# and the bar-metal water capture passes --no-los-view to match.
 capture_ref water   --frames 260 --shotframe 200 --select 0 --los 0 --cam "5824,0,4032,1800,0.9,0.8" || true
 
 # --- FLIP score ---

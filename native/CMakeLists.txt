@@ -75,6 +75,7 @@ add_executable(bar-metal
   sim/weapon/bomb.cpp
   sim/weapon/dgun.cpp
   sim/los/los.cpp
+  sim/los/los_map.cpp
   lua/gl/gl_api.cpp
   lua/gl/image_cache.cpp
   ui/widget_host.cpp
