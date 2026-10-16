@@ -59,14 +59,22 @@ local function lock()
 	local p = want(id)
 	if not p then return end
 
+	-- camera.cpp eye.y is absolute (cos(tilt)*dist + lift), not target-relative, while
+	-- Spring puts the eye at focus - dir*dist. Solve dist/rx from the camera.cpp
+	-- eye->target vector so the Recoil eye lands exactly on the bar-metal eye.
+	local vx, vy, vz = p.ex - p.tx, p.ey - p.ty, p.ez - p.tz
+	local horiz = math.sqrt(vx * vx + vz * vz)
+	local dist = math.sqrt(horiz * horiz + vy * vy)
+	local rx = math.pi - math.atan2(horiz, vy)
+	p.rx = rx
 	Spring.SetCameraState({
 		name = "spring",
 		mode = 2,
 		px = p.tx,
 		py = p.ty,
 		pz = p.tz,
-		dist = DIST,
-		rx = SPRING_RX,
+		dist = dist,
+		rx = rx,
 		ry = SPRING_RY,
 		rz = 0,
 		fov = 45,
@@ -84,7 +92,7 @@ local function lock()
 		Spring.Log("oracle_shot", "info", string.format(
 			"oracle_cam err=%.1f want=%.0f,%.0f,%.0f got=%.0f,%.0f,%.0f dir=%.2f,%.2f,%.2f rx=%.3f ry=%.3f",
 			err, p.ex, p.ey, p.ez, cx or -1, cy or -1, cz or -1,
-			dx or 0, dy or 0, dz or 0, SPRING_RX, SPRING_RY
+			dx or 0, dy or 0, dz or 0, p.rx, SPRING_RY
 		))
 		dumped = true
 	end
