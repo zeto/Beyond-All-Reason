@@ -32,6 +32,8 @@ public:
     bool init(const std::string& shader_path, const TerrainMesh& mesh, std::string& error);
     // Uploads one baked model. An empty mesh is rejected. Team color tints tex1 alpha.
     bool set_model(const ModelMesh& model, float color_r, float color_g, float color_b, std::string& error);
+    // Map Grass GL4 port (map/grass.h). Without a call no grass is drawn.
+    bool set_grass(const struct GrassData& grass, std::string& error);
     void set_pose(float x, float y, float z, float heading, float bank = 0);
     // Column-major piece matrices, 16 floats each. A 0 in element 15 hides that piece.
     void set_pieces(const float* column_major, int count);

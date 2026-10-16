@@ -46,6 +46,7 @@ add_executable(bar-metal
   map/smf.cpp
   map/smf_textures.cpp
   map/water_textures.cpp
+  map/grass.cpp
   map/bookmarks.cpp
   vfs/pool.cpp
   defs/unitdef.cpp

@@ -16,6 +16,7 @@
 #include "weapon/missile.h"
 #include "camera.h"
 #include "autocolors.h"
+#include "grass.h"
 #include "command/orders.h"
 #include "economy/energy_yield.h"
 #include "economy/metal_extract.h"
@@ -74,6 +75,8 @@ struct Options {
     std::string input;
     std::string pieces;
     bool lock_camera = false;
+    // Skip Map Grass GL4 (A/B timing of the grass pass).
+    bool no_grass = false;
     // FILE#ID: with --lock-camera, hold that bookmark camera instead of following unit 0.
     std::string fixed_camera;
     bool check_hud_text = false;
@@ -170,6 +173,8 @@ bool parse_args(int argc, char** argv, Options& options) {
                 return false;
             }
             options.fixed_camera = value;
+        } else if (arg == "--no-grass") {
+            options.no_grass = true;
         } else if (arg == "--lock-camera") {
             options.lock_camera = true;
         } else if (arg == "--check-hud-text") {
@@ -453,6 +458,19 @@ int run_terrain(const Options& options, const std::string& game_name) {
         if (!bar::spawn_commanders(options.game_root, data_dir.string(), script, mesh, units, model, error)) {
             std::cerr << "spawn: " << error << "\n";
             return 1;
+        }
+        {
+            bar::GrassData grass;
+            std::string grass_error;
+            if (options.no_grass) {
+                std::cerr << "grass: disabled by --no-grass\n";
+            } else if (bar::load_grass(mesh, grass, grass_error)) {
+                if (!renderer.set_grass(grass, grass_error)) {
+                    std::cerr << grass_error << "\n";
+                }
+            } else {
+                std::cerr << grass_error << "\n";
+            }
         }
         const bar::UnitSpawn& lead = units.front();
         if (!renderer.set_model(model, lead.color_r, lead.color_g, lead.color_b, error)) {

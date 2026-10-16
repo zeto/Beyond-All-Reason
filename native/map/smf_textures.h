@@ -10,7 +10,7 @@ struct TerrainMesh;
 
 // CPU-side texture ready for upload. levels[0] is the base mip.
 struct GpuImage {
-    enum class Format { None, RGBA8, BC1, BC2, BC3, RG16F };
+    enum class Format { None, RGBA8, BC1, BC2, BC3, RG16F, R32F };
     Format format = Format::None;
     int width = 0;
     int height = 0;
@@ -54,5 +54,10 @@ bool decode_tga(const std::vector<uint8_t>& bytes, GpuImage& out, std::string& e
 bool decode_dds_blocks(const std::vector<uint8_t>& bytes, GpuImage& out, std::string& error);
 // Box-filter mip chain for an RGBA8 image (glGenerateMipmap equivalent).
 void build_rgba_mips(GpuImage& image);
+// ImageIO decode (JPEG/PNG) to RGBA8, rows top-first.
+bool decode_image_rgba(const std::vector<uint8_t>& bytes, GpuImage& out);
+// FIND_MAP_TEXTURE in the map archive, and a plain file read.
+bool map_file_bytes(const std::string& archive, const std::string& name, std::vector<uint8_t>& out);
+bool disk_file_bytes(const std::string& path, std::vector<uint8_t>& out);
 
 }  // namespace bar

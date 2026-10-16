@@ -45,6 +45,10 @@ struct Uniforms {
     float4 water_shore;
     float4 water_extra;
     float4 water_screen;
+    float4 grass_a;
+    float4 grass_b;
+    float4 grass_c;
+    float4 grass_u;
 };
 
 // Recoil CGlobalRendering::SMF_INTENSITY_MULT.
@@ -583,6 +587,113 @@ fragment float4 water_fs(Varying in [[stage_in]],
     // Soft waterline: fade to the plain seabed over the first elmo of depth.
     color = mix(refr, color, saturate(depth));
     return float4(color, 1.0);
+}
+
+// Map Grass GL4 (BAR luaui/Shaders/map_grass_gl4.{vert,frag}.glsl, MIT, Beherith), ported
+// to MSL. COMPACTVBO layout; UNITBENDENABLED off (no unit bend data), LOS factor 1 and no
+// fog (bar-metal has no $info LOS texture; the widget disables fog), nightFactor 1.
+struct GrassVertex {
+    float4 pos_u;
+    float4 norm_v;
+};
+
+struct GrassOut {
+    float4 position [[position]];
+    float4 tex;       // xy texcoords0, w normal facing (debug only)
+    float4 map_color;
+    float4 params;    // x distance fade, y shadow, z LOS, w wind shade
+};
+
+vertex GrassOut grass_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
+                         const device GrassVertex* vertices [[buffer(1)]],
+                         const device float4* instances [[buffer(3)]],
+                         constant Uniforms& u [[buffer(0)]],
+                         depth2d<float> shadow_map [[texture(2)]],
+                         texture2d<float> perlin [[texture(19)]],
+                         texture2d<float> heightmap [[texture(20)]],
+                         texture2d<float> map_color_tex [[texture(21)]]) {
+    constexpr sampler lin(coord::normalized, filter::linear, mip_filter::linear, address::repeat);
+    constexpr sampler clamp_s(coord::normalized, filter::linear, address::clamp_to_edge);
+    constexpr sampler cmp(coord::normalized, filter::linear, address::clamp_to_edge, compare_func::less_equal);
+    const GrassVertex vert = vertices[vid];
+    const float4 inst = instances[iid];  // x, rot, z, size
+    GrassOut out;
+    out.position = float4(2.0, 2.0, 2.0, 1.0);
+    out.tex = float4(0.0);
+    out.map_color = float4(0.0);
+    out.params = float4(0.0);
+
+    const float4 clip0 = u.view_proj * float4(inst.x, 0.0, inst.z, 1.0);
+    const float absw = abs(clip0.w);
+    if (absw < 0.00001) return out;
+    // GL clip z is -w..w; Metal's is 0..w.
+    if (clip0.z < -absw || clip0.z > absw) return out;
+    if (inst.w <= 0.0) return out;
+
+    const float3 vpos = vert.pos_u.xyz;
+    const float blade = inst.w;
+    float3 p = vpos * blade;
+    const float c = cos(inst.y), s = sin(inst.y);
+    // GLSL rotation3dY(a): mat3(c, 0, s, 0, 1, 0, -s, 0, c) (column-major), times p.
+    const float3 rp = float3(c * p.x - s * p.z, p.y, s * p.x + c * p.z);
+    p.xz = rp.xz + inst.xz;
+
+    const float2 map_size = u.map.xy;
+    const float2 uvhm = float2(clamp(p.x, 8.0, map_size.x - 8.0), clamp(p.z, 8.0, map_size.y - 8.0)) / map_size;
+    const float ground = heightmap.sample(clamp_s, uvhm, level(0.0)).x;
+    p.y = (vpos.y + 0.5) * blade + ground;
+
+    const float los = 1.0;
+
+    // SHADOWTAPS 4: the cross of four taps around the vertex.
+    float shadow = 1.0;
+    if (u.shadow.z > 0.5) {
+        const float2 offs[4] = {float2(4.0, 4.0), float2(-4.0, -4.0), float2(-4.0, 4.0), float2(4.0, -4.0)};
+        for (int k = 0; k < 4; ++k) {
+            const float4 sc = u.shadow_vp * float4(p + float3(offs[k].x, 0.0, offs[k].y), 1.0);
+            const float3 ndc = sc.xyz / sc.w;
+            const float2 suv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+            float lit = 1.0;
+            if (all(suv >= 0.0) && all(suv <= 1.0) && ndc.z <= 1.0) {
+                lit = shadow_map.sample_compare(cmp, suv, ndc.z - 0.0015, level(0));
+            }
+            shadow += clamp(lit, u.grass_b.w, 1.0);
+        }
+        shadow *= 0.2;
+    }
+    out.params.y = clamp(shadow, u.grass_b.w, 1.0);
+    out.params.z = los;
+
+    out.map_color = map_color_tex.sample(clamp_s, float2(p.x / map_size.x, p.z / map_size.y), level(0.0));
+
+    float4 noise = perlin.sample(lin, (p.xz + u.grass_u.xy * u.grass_b.y) * u.grass_b.z, level(0.0));
+    noise = (noise - 0.5).xzyw;
+    float shade = noise.y * 2.0;
+    shade = (shade - 0.66) * 3.0;
+    noise.y = noise.y - 0.4;
+    out.params.w = mix(1.0, shade, vert.norm_v.w);
+    p = p + noise.xyz * vpos.y * blade * u.grass_b.x * u.grass_u.z;
+
+    const float dist = length(p - u.eye.xyz);
+    out.params.x = clamp((u.grass_c.y - dist) / (u.grass_c.y - u.grass_c.x), 0.0, 1.0);
+    out.tex = float4(vert.pos_u.w, vert.norm_v.w, 0.0, 0.0);
+    out.position = u.view_proj * float4(p, 1.0);
+    return out;
+}
+
+fragment float4 grass_fs(GrassOut in [[stage_in]],
+                         constant Uniforms& u [[buffer(0)]],
+                         texture2d<float> blade_tex [[texture(18)]]) {
+    constexpr sampler lin(coord::normalized, filter::linear, mip_filter::linear, address::repeat);
+    // DDS blade art is stored top-first; GL's v = 0 is the bottom row after nv_dds' flip.
+    float4 color = blade_tex.sample(lin, float2(in.tex.x, 1.0 - in.tex.y));
+    color.rgb = mix(color.rgb, color.rgb * (in.map_color.rgb * 2.0), u.grass_a.x);
+    color.rgb = mix(color.rgb, in.map_color.rgb, (1.0 - in.tex.y) * u.grass_a.y);
+    color.a = color.a * u.grass_u.w * in.params.x;
+    color.rgb *= in.params.y * in.params.z * in.params.w * u.grass_a.w;
+    color.a = clamp((color.a - 0.5) * 1.5 + 0.5, 0.0, 1.0);
+    if (color.a < u.grass_a.z) discard_fragment();
+    return color;
 }
 
 // Free mex ring. gui_metalspots uses rgb (0, 1, 0.5) and fades the ring near alpha 0.5.

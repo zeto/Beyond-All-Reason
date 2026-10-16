@@ -539,4 +539,10 @@ bool load_terrain_textures(const TerrainMesh& mesh, TerrainTextures& out, std::s
     return true;
 }
 
+bool decode_image_rgba(const std::vector<uint8_t>& bytes, GpuImage& out) { return decode_imageio_rgba(bytes, out); }
+bool map_file_bytes(const std::string& archive, const std::string& name, std::vector<uint8_t>& out) {
+    return read_map_file(archive, name, out);
+}
+bool disk_file_bytes(const std::string& path, std::vector<uint8_t>& out) { return read_disk_file(path, out); }
+
 }  // namespace bar

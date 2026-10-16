@@ -1,4 +1,5 @@
 #include "terrain_renderer.h"
+#include "grass.h"
 
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreText/CoreText.h>
@@ -98,6 +99,14 @@ struct TerrainUniforms {
     float water_extra[4];
     // 1 / target size (xy) for screen-space refraction lookups.
     float water_screen[4];
+    // Map Grass GL4: x MAPCOLORFACTOR, y MAPCOLORBASE, z ALPHATHRESHOLD, w GRASSBRIGHTNESS.
+    float grass_a[4];
+    // x WINDSTRENGTH, y WINDSCALE, z WINDSAMPLESCALE, w SHADOWFACTOR.
+    float grass_b[4];
+    // x FADESTART * distanceMult, y FADEEND * distanceMult, zw unused.
+    float grass_c[4];
+    // grassuniforms: wind offset x, wind offset z, wind strength, global alpha.
+    float grass_u[4];
 };
 
 // terrain_fs texture slots. Slot 2 is the shadow map.
@@ -105,7 +114,8 @@ enum GroundSlot { kGroundDiffuse = 0, kGroundNormals = 1, kGroundSpecular = 3, k
                   kGroundBlendNormals = 5, kGroundSplatNormal0 = 6, kGroundSlots = 10 };
 // Above the ground slots: atmosphere.skyBox cube and the $reflection cube (model_fs).
 enum { kSkyCubeSlot = 10, kReflectionSlot = 11, kWaterSlot = 12, kRefractColorSlot = 13, kRefractDepthSlot = 14,
-       kFoamSlot = 15, kWaveNormalSlot = 16, kCausticsSlot = 17, kTextureSlots = 18 };
+       kFoamSlot = 15, kWaveNormalSlot = 16, kCausticsSlot = 17, kGrassBladeSlot = 18, kGrassPerlinSlot = 19,
+       kGrassHeightSlot = 20, kGrassMapColorSlot = 21, kTextureSlots = 22 };
 // Recoil CubeTexSizeReflection default; the oracle config does not set it, and BAR's
 // api_pbr_enabler only changes the config after the cubemap exists.
 constexpr NSUInteger kReflectionSize = 128;
@@ -175,6 +185,25 @@ struct TerrainRenderer::Impl {
     float water_surface[4] = {0, 0, 0, 0};
     float water_shore[4] = {0, 0, 0, 0};
     float water_extra[4] = {0, 0, 0, 0};
+    // Map Grass GL4 port.
+    id<MTLRenderPipelineState> grass_pipeline = nil;
+    id<MTLDepthStencilState> grass_depth = nil;
+    id<MTLBuffer> grass_vertices = nil;
+    id<MTLBuffer> grass_indices = nil;
+    id<MTLBuffer> grass_instances = nil;
+    id<MTLTexture> grass_blade = nil;
+    id<MTLTexture> grass_perlin = nil;
+    id<MTLTexture> grass_height = nil;
+    NSUInteger grass_index_count = 0;
+    std::vector<uint32_t> grass_tile_offset;
+    std::vector<uint32_t> grass_tile_count;
+    int grass_cols = 0;
+    int grass_rows = 0;
+    float grass_tile_world = 512.f;
+    float grass_a[4] = {0, 0, 0, 0};
+    float grass_b[4] = {0, 0, 0, 0};
+    float grass_c[4] = {0, 0, 0, 0};
+    float grass_wind[2] = {4.5f, 20.f};  // grassWindMult, maxWindSpeed
     id<MTLSamplerState> sampler = nil;
     id<MTLTexture> depth = nil;
     id<MTLTexture> offscreen = nil;
@@ -214,6 +243,80 @@ struct TerrainRenderer::Impl {
     float unit_ambient[4] = {0.4f, 0.4f, 0.4f, 0};
     float unit_diffuse[4] = {0.7f, 0.7f, 0.7f, 0};
     float unit_specular[4] = {0.7f, 0.7f, 0.7f, 0};
+    // Grass CPU side: heightmap copy for Spring.GetGroundHeight(camera) and tile culling.
+    std::vector<float> grass_heights;
+    int grass_hm_w = 0;
+    int grass_hm_h = 0;
+    float grass_square = 8.f;
+
+    float ground_height_at(float x, float z) const {
+        if (grass_heights.empty()) return 0.f;
+        const int ix = std::clamp(static_cast<int>(x / grass_square + 0.5f), 0, grass_hm_w - 1);
+        const int iz = std::clamp(static_cast<int>(z / grass_square + 0.5f), 0, grass_hm_h - 1);
+        return grass_heights[static_cast<size_t>(iz) * grass_hm_w + ix];
+    }
+
+    // DrawWorldPreUnit tile culling: tiles within fadeEnd + tileRadius of the camera whose
+    // bounding sphere (tileMidHeight, tileRadius) is in the view frustum, merged into runs.
+    void cull_grass(const float* m, const float* eye, std::vector<std::pair<uint32_t, uint32_t>>& runs) const {
+        runs.clear();
+        const float half = grass_tile_world * 0.5f;
+        const float tile_mid = (height_min + height_max) * 0.5f;
+        const float slack = (height_max - height_min) * 0.5f + 200.f;
+        const float radius = std::sqrt(half * half * 2.f) + slack;
+        const float bound = grass_c[1] + radius;
+        // Clip planes from the column-major view_proj (Metal depth 0..1).
+        float planes[6][4];
+        for (int i = 0; i < 4; ++i) {
+            const float r0 = m[i * 4 + 0], r1 = m[i * 4 + 1], r2 = m[i * 4 + 2], r3 = m[i * 4 + 3];
+            planes[0][i] = r3 + r0;
+            planes[1][i] = r3 - r0;
+            planes[2][i] = r3 + r1;
+            planes[3][i] = r3 - r1;
+            planes[4][i] = r2;
+            planes[5][i] = r3 - r2;
+        }
+        const int tx0 = std::max(0, static_cast<int>(std::floor((eye[0] - bound) / grass_tile_world)));
+        const int tx1 = std::min(grass_cols - 1, static_cast<int>(std::floor((eye[0] + bound) / grass_tile_world)));
+        const int tz0 = std::max(0, static_cast<int>(std::floor((eye[2] - bound) / grass_tile_world)));
+        const int tz1 = std::min(grass_rows - 1, static_cast<int>(std::floor((eye[2] + bound) / grass_tile_world)));
+        for (int tz = tz0; tz <= tz1; ++tz) {
+            const float czw = tz * grass_tile_world + half;
+            long start = -1;
+            uint32_t count = 0;
+            for (int tx = tx0; tx <= tx1; ++tx) {
+                const size_t tile = static_cast<size_t>(tz) * grass_cols + tx;
+                bool visible = false;
+                if (grass_tile_count[tile] > 0) {
+                    const float cxw = tx * grass_tile_world + half;
+                    const float dx = cxw - eye[0], dz = czw - eye[2];
+                    if (dx * dx + dz * dz < bound * bound) {
+                        visible = true;
+                        for (const auto& p : planes) {
+                            const float len = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+                            if ((p[0] * cxw + p[1] * tile_mid + p[2] * czw + p[3]) / len < -radius) {
+                                visible = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (visible) {
+                    if (start < 0) {
+                        start = grass_tile_offset[tile];
+                        count = grass_tile_count[tile];
+                    } else {
+                        count += grass_tile_count[tile];
+                    }
+                } else if (start >= 0) {
+                    runs.emplace_back(static_cast<uint32_t>(start), count);
+                    start = -1;
+                    count = 0;
+                }
+            }
+            if (start >= 0) runs.emplace_back(static_cast<uint32_t>(start), count);
+        }
+    }
 };
 
 namespace {
@@ -366,6 +469,17 @@ struct SceneBindings {
     id<MTLTexture> foam_tex;
     id<MTLTexture> wave_tex;
     id<MTLTexture> caustics_tex;
+    id<MTLRenderPipelineState> grass_pipeline;
+    id<MTLDepthStencilState> grass_depth;
+    id<MTLBuffer> grass_vertices;
+    id<MTLBuffer> grass_indices;
+    id<MTLBuffer> grass_instances;
+    id<MTLTexture> grass_blade;
+    id<MTLTexture> grass_perlin;
+    id<MTLTexture> grass_height;
+    NSUInteger grass_index_count;
+    // Visible tile runs (first instance, count), DrawWorldPreUnit's cullRuns.
+    std::vector<std::pair<uint32_t, uint32_t>> grass_runs;
     // ReadMap::HasVisibleWater (some ground below 0); BasicWater skips the draw otherwise.
     bool water_visible = false;
     id<MTLBuffer> pieces;
@@ -387,6 +501,7 @@ MTLPixelFormat gpu_format(GpuImage::Format format) {
         case GpuImage::Format::BC2: return MTLPixelFormatBC2_RGBA;
         case GpuImage::Format::BC3: return MTLPixelFormatBC3_RGBA;
         case GpuImage::Format::RG16F: return MTLPixelFormatRG16Float;
+        case GpuImage::Format::R32F: return MTLPixelFormatR32Float;
         default: return MTLPixelFormatInvalid;
     }
 }
@@ -768,6 +883,32 @@ void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, i
                           indexType:MTLIndexTypeUInt32
                         indexBuffer:scene.indices.gpuAddress
                   indexBufferLength:scene.indices.length];
+
+    // widget:DrawWorldPreUnit (Map Grass GL4): after the ground, before units. Depth test
+    // LEQUAL with depth writes, back-face culling.
+    if (scene.grass_pipeline != nil && !scene.grass_runs.empty()) {
+        [scene.arguments setTexture:scene.grass_blade.gpuResourceID atIndex:kGrassBladeSlot];
+        [scene.arguments setTexture:scene.grass_perlin.gpuResourceID atIndex:kGrassPerlinSlot];
+        [scene.arguments setTexture:scene.grass_height.gpuResourceID atIndex:kGrassHeightSlot];
+        [scene.arguments setTexture:scene.minimap.gpuResourceID atIndex:kGrassMapColorSlot];
+        [scene.arguments setTexture:scene.shadow_map.gpuResourceID atIndex:2];
+        [scene.arguments setAddress:scene.grass_vertices.gpuAddress atIndex:1];
+        [encoder setRenderPipelineState:scene.grass_pipeline];
+        [encoder setDepthStencilState:scene.grass_depth];
+        [encoder setCullMode:MTLCullModeBack];
+        [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
+        for (const auto& run : scene.grass_runs) {
+            [scene.arguments setAddress:scene.grass_instances.gpuAddress + run.first * 16 atIndex:3];
+            [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                 indexCount:scene.grass_index_count
+                                  indexType:MTLIndexTypeUInt32
+                                indexBuffer:scene.grass_indices.gpuAddress
+                          indexBufferLength:scene.grass_indices.length
+                              instanceCount:run.second];
+        }
+        [encoder setCullMode:MTLCullModeNone];
+        [encoder setFrontFacingWinding:MTLWindingClockwise];
+    }
 
     if (model_drawable(scene)) {
         [scene.arguments setTexture:scene.model_color.gpuResourceID atIndex:0];
@@ -1642,6 +1783,17 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
         error = ns_error(ns_error_obj, "water pipeline creation failed");
         return false;
     }
+    impl_->grass_pipeline = make_pipeline(compiler, library, @"grass_vs", @"grass_fs", true, &ns_error_obj);
+    if (impl_->grass_pipeline == nil) {
+        error = ns_error(ns_error_obj, "grass pipeline creation failed");
+        return false;
+    }
+    {
+        MTLDepthStencilDescriptor* grass_depth = [MTLDepthStencilDescriptor new];
+        grass_depth.depthCompareFunction = MTLCompareFunctionLessEqual;
+        grass_depth.depthWriteEnabled = YES;
+        impl_->grass_depth = [impl_->device newDepthStencilStateWithDescriptor:grass_depth];
+    }
     impl_->model_pipeline = make_pipeline(compiler, library, @"model_vs", @"model_fs", false, &ns_error_obj);
     if (impl_->model_pipeline == nil) {
         error = ns_error(ns_error_obj, "model pipeline creation failed");
@@ -2033,6 +2185,52 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
     return true;
 }
 
+bool TerrainRenderer::set_grass(const GrassData& grass, std::string& error) {
+    if (impl_->device == nil || impl_->residency == nil || !grass.valid) {
+        error = "grass: renderer not initialized or no grass data";
+        return false;
+    }
+    impl_->grass_vertices =
+        upload(impl_->device, grass.patch_vertices.data(), grass.patch_vertices.size() * sizeof(float));
+    impl_->grass_indices =
+        upload(impl_->device, grass.patch_indices.data(), grass.patch_indices.size() * sizeof(uint32_t));
+    impl_->grass_instances = upload(impl_->device, grass.instances.data(), grass.instances.size() * sizeof(float));
+    impl_->grass_blade = upload_image(impl_->device, grass.blade_tex);
+    impl_->grass_perlin = upload_image(impl_->device, grass.perlin_tex);
+    impl_->grass_height = upload_image(impl_->device, grass.heightmap);
+    if (impl_->grass_vertices == nil || impl_->grass_indices == nil || impl_->grass_instances == nil ||
+        impl_->grass_blade == nil || impl_->grass_perlin == nil || impl_->grass_height == nil) {
+        error = "grass: GPU upload failed";
+        impl_->grass_vertices = nil;
+        return false;
+    }
+    for (id<MTLAllocation> a : std::initializer_list<id<MTLAllocation>>{
+             impl_->grass_vertices, impl_->grass_indices, impl_->grass_instances, impl_->grass_blade,
+             impl_->grass_perlin, impl_->grass_height}) {
+        [impl_->residency addAllocation:a];
+    }
+    [impl_->residency commit];
+    impl_->grass_index_count = grass.patch_indices.size();
+    impl_->grass_tile_offset = grass.tile_offset;
+    impl_->grass_tile_count = grass.tile_count;
+    impl_->grass_cols = grass.grid_cols;
+    impl_->grass_rows = grass.grid_rows;
+    impl_->grass_tile_world = grass.tile_world;
+    const float a4[4] = {grass.map_color_factor, grass.map_color_base, grass.alpha_threshold, grass.grass_brightness};
+    const float b4[4] = {grass.wind_strength, grass.wind_scale, grass.wind_sample_scale, grass.shadow_factor};
+    const float c4[4] = {grass.fade_start * grass.distance_mult, grass.fade_end * grass.distance_mult, 0.f, 0.f};
+    std::memcpy(impl_->grass_a, a4, sizeof(a4));
+    std::memcpy(impl_->grass_b, b4, sizeof(b4));
+    std::memcpy(impl_->grass_c, c4, sizeof(c4));
+    impl_->grass_wind[0] = grass.grass_wind_mult;
+    impl_->grass_wind[1] = grass.max_wind_speed;
+    impl_->grass_hm_w = grass.heightmap.width;
+    impl_->grass_hm_h = grass.heightmap.height;
+    impl_->grass_heights.resize(static_cast<size_t>(grass.heightmap.width) * grass.heightmap.height);
+    std::memcpy(impl_->grass_heights.data(), grass.heightmap.levels[0].data(), impl_->grass_heights.size() * 4);
+    return true;
+}
+
 bool TerrainRenderer::set_model(const ModelMesh& model, float color_r, float color_g, float color_b,
                                 std::string& error) {
     if (impl_->device == nil || impl_->residency == nil) {
@@ -2253,6 +2451,25 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     std::memcpy(uniforms.water_extra, impl_->water_extra, sizeof(uniforms.water_extra));
     uniforms.water_extra[2] = impl_->foam_tex != nil ? 1.f : 0.f;
     uniforms.water_extra[3] = impl_->reflection != nil ? 1.f : 0.f;
+    std::memcpy(uniforms.grass_a, impl_->grass_a, sizeof(uniforms.grass_a));
+    std::memcpy(uniforms.grass_b, impl_->grass_b, sizeof(uniforms.grass_b));
+    std::memcpy(uniforms.grass_c, impl_->grass_c, sizeof(uniforms.grass_c));
+    {
+        // getWindSpeed: bar-metal's Spring.GetWind direction is (0, 0), so the wind offsets stay 0
+        // and windStrength = min(maxWindSpeed, max(4, |x| + |z|)) = 4.
+        const float wind_x = 0.f, wind_z = 0.f;
+        uniforms.grass_u[0] = 0.f;
+        uniforms.grass_u[1] = 0.f;
+        uniforms.grass_u[2] = std::min(impl_->grass_wind[1], std::max(4.f, std::fabs(wind_x) + std::fabs(wind_z)));
+        // globalgrassfade from camera height over the ground (the widget smooths it over wall
+        // time; bar-metal applies the target value).
+        float fade = 1.f;
+        if (frame.eye != nullptr && impl_->grass_c[1] > impl_->grass_c[0]) {
+            const float cam_height = frame.eye[1] - std::max(0.f, impl_->ground_height_at(frame.eye[0], frame.eye[2]));
+            fade = std::clamp((impl_->grass_c[1] - cam_height) / (impl_->grass_c[1] - impl_->grass_c[0]), 0.f, 1.f);
+        }
+        uniforms.grass_u[3] = fade;
+    }
     uniforms.water_screen[0] = 1.f / static_cast<float>(width);
     uniforms.water_screen[1] = 1.f / static_cast<float>(height);
     if (!invert4(uniforms.view_proj, uniforms.sky_inv)) {
@@ -2448,6 +2665,18 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     scene.foam_tex = impl_->foam_tex;
     scene.wave_tex = impl_->wave_tex;
     scene.caustics_tex = impl_->caustics_tex;
+    scene.grass_pipeline = impl_->grass_vertices != nil ? impl_->grass_pipeline : nil;
+    scene.grass_depth = impl_->grass_depth;
+    scene.grass_vertices = impl_->grass_vertices;
+    scene.grass_indices = impl_->grass_indices;
+    scene.grass_instances = impl_->grass_instances;
+    scene.grass_blade = impl_->grass_blade;
+    scene.grass_perlin = impl_->grass_perlin;
+    scene.grass_height = impl_->grass_height;
+    scene.grass_index_count = impl_->grass_index_count;
+    if (impl_->grass_vertices != nil && frame.eye != nullptr && frame.view_proj != nullptr) {
+        impl_->cull_grass(frame.view_proj, frame.eye, scene.grass_runs);
+    }
     scene.water_visible = impl_->map[2] > 0.5f;
     scene.pieces = slot.pieces;
     scene.shadow_map = impl_->shadow_map;

@@ -43,6 +43,8 @@ struct TerrainMesh {
     struct MetalSpot {
         float x = 0;
         float z = 0;
+        // max(maxX - minX, maxZ - minZ) of the spot in elmos (resource_spot_finder extents).
+        float extent = 0;
     };
     std::vector<MetalSpot> metal_spots;
     // Cyan mex rings. Empty on a metal map, where the HUD draws none.
@@ -136,6 +138,21 @@ struct TerrainMesh {
         float wave_foam_distortion = 0.05f;
         float wave_foam_intensity = 0.5f;
     } water;
+    // mapinfo custom.grassconfig (luaui/Widgets/map_grass_gl4.lua merges it over its defaults).
+    // has_* marks keys the map sets; the widget defaults apply otherwise.
+    struct GrassConfig {
+        bool present = false;
+        std::string grass_dist_tga;
+        std::string grass_blade_color_tex;
+        bool has_min_size = false, has_max_size = false, has_patch_resolution = false;
+        float grass_min_size = 0, grass_max_size = 0, patch_resolution = 0;
+        bool has_jitter = false;
+        float patch_placement_jitter = 0;
+        bool has_blade_scale = false;
+        float grass_blade_scale = 0;
+        // grassShaderParams keys the map overrides, lowercase name -> value.
+        std::vector<std::pair<std::string, float>> shader_params;
+    } grass;
 };
 
 float terrain_height_at(const TerrainMesh& mesh, float x, float z);

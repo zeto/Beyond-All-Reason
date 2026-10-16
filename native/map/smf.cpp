@@ -9,6 +9,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -180,6 +181,7 @@ struct MapInfo {
     float splat_scales[4] = {0.02f, 0.02f, 0.02f, 0.02f};
     float splat_mults[4] = {1.f, 1.f, 1.f, 1.f};
     TerrainMesh::Water water;
+    TerrainMesh::GrassConfig grass;
     // Spring uses 100 when a map omits extractorRadius. Recoil's maxMetal default is 0.02.
     float extractor_radius = 100.f;
     float max_metal = 0.02f;
@@ -348,6 +350,39 @@ bool read_mapinfo(const std::vector<uint8_t>& bytes, MapInfo& info, std::string&
     if (lua_istable(state, -1)) {
         read_vec4(state, "texscales", info.splat_scales);
         read_vec4(state, "texmults", info.splat_mults);
+    }
+    lua_pop(state, 1);
+
+    lua_getfield(state, -1, "custom");
+    if (lua_istable(state, -1)) {
+        lua_getfield(state, -1, "grassconfig");
+        if (lua_istable(state, -1)) {
+            TerrainMesh::GrassConfig& g = info.grass;
+            g.present = true;
+            read_string(state, "grassdisttga", g.grass_dist_tga);
+            read_string(state, "grassbladecolortex", g.grass_blade_color_tex);
+            g.has_min_size = read_number(state, "grassminsize", g.grass_min_size);
+            g.has_max_size = read_number(state, "grassmaxsize", g.grass_max_size);
+            g.has_patch_resolution = read_number(state, "patchresolution", g.patch_resolution);
+            g.has_jitter = read_number(state, "patchplacementjitter", g.patch_placement_jitter);
+            g.has_blade_scale = read_number(state, "grassbladescale", g.grass_blade_scale);
+            lua_getfield(state, -1, "grassshaderparams");
+            if (lua_istable(state, -1)) {
+                lua_pushnil(state);
+                while (lua_next(state, -2) != 0) {
+                    if (lua_type(state, -2) == LUA_TSTRING && lua_isnumber(state, -1)) {
+                        std::string key = lua_tostring(state, -2);
+                        for (char& c : key) {
+                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                        }
+                        g.shader_params.emplace_back(key, static_cast<float>(lua_tonumber(state, -1)));
+                    }
+                    lua_pop(state, 1);
+                }
+            }
+            lua_pop(state, 1);
+        }
+        lua_pop(state, 1);
     }
     lua_pop(state, 1);
 
@@ -660,6 +695,7 @@ void build_metal_rings(TerrainMesh& mesh, float extractor_radius) {
         float x = 0;
         float z = 0;
         float scale = 1;
+        float extent = 0;
     };
     std::vector<Spot> spots;
     bool metal_map = false;
@@ -694,7 +730,7 @@ void build_metal_rings(TerrainMesh& mesh, float extractor_radius) {
         if (!(shown > 0.001f && shown < 15.f) || !(scale < 4.f)) {
             continue;
         }
-        spots.push_back(Spot{(min_x + max_x) * 0.5f, (group.min_z + group.max_z) * 0.5f, scale});
+        spots.push_back(Spot{(min_x + max_x) * 0.5f, (group.min_z + group.max_z) * 0.5f, scale, std::max(width, depth)});
     }
     if (metal_map) {
         mesh.metal_map = true;
@@ -703,7 +739,7 @@ void build_metal_rings(TerrainMesh& mesh, float extractor_radius) {
 
     mesh.metal_spots.clear();
     for (const Spot& spot : spots) {
-        mesh.metal_spots.push_back(TerrainMesh::MetalSpot{spot.x, spot.z});
+        mesh.metal_spots.push_back(TerrainMesh::MetalSpot{spot.x, spot.z, spot.extent});
     }
 
     // Visible band of the widget ring: inner 1.8*(12-1)*2*scale, outer 1.98*(12+1)*2*scale.
@@ -805,6 +841,7 @@ bool build_mesh(const std::vector<uint8_t>& smf, const MapInfo& info, TerrainMes
     std::memcpy(mesh.splat_scales, info.splat_scales, sizeof(mesh.splat_scales));
     std::memcpy(mesh.splat_mults, info.splat_mults, sizeof(mesh.splat_mults));
     mesh.water = info.water;
+    mesh.grass = info.grass;
     mesh.ground_shadow_density = std::clamp(info.ground_shadow_density, 0.f, 1.f);
     mesh.unit_shadow_density = std::clamp(info.unit_shadow_density, 0.f, 1.f);
     mesh.starts = info.starts;
