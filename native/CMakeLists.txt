@@ -41,6 +41,7 @@ add_executable(bar-metal
   lua/gadget_host.cpp
   vfs/archive.cpp
   map/startscript.cpp
+  map/autocolors.cpp
   map/camera.cpp
   map/smf.cpp
   map/smf_textures.cpp

@@ -1,4 +1,5 @@
 #include "widget_host.h"
+#include "autocolors.h"
 
 #include "gl/gl_api.h"
 #include "selection.h"
@@ -1174,11 +1175,12 @@ int ui_get_mod_options(lua_State* state) {
 }
 
 int ui_get_team_color(lua_State* state) {
-    // Armada red from startscript team color.
-    (void)state;
-    lua_pushnumber(state, 0.90);
-    lua_pushnumber(state, 0.15);
-    lua_pushnumber(state, 0.12);
+    // Team 0's colour after BAR autocolors (map/autocolors.cpp).
+    float r = 0, g = 0, b = 0;
+    ui_team_color(r, g, b);
+    lua_pushnumber(state, r);
+    lua_pushnumber(state, g);
+    lua_pushnumber(state, b);
     return 3;
 }
 

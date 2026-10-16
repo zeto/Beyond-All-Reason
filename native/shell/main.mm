@@ -15,6 +15,7 @@
 #include "weapon/lightning.h"
 #include "weapon/missile.h"
 #include "camera.h"
+#include "autocolors.h"
 #include "command/orders.h"
 #include "economy/energy_yield.h"
 #include "economy/metal_extract.h"
@@ -386,6 +387,14 @@ int run_terrain(const Options& options, const std::string& game_name) {
     if (!bar::parse_start_script(options.start_script, script, error)) {
         std::cerr << "startscript: " << error << "\n";
         return 1;
+    }
+    {
+        std::string note;
+        bar::apply_bar_autocolors(script, note);
+        std::cout << note << "\n";
+        if (!script.teams.empty()) {
+            bar::set_ui_team_color(script.teams[0].color_r, script.teams[0].color_g, script.teams[0].color_b);
+        }
     }
     const std::string map_dir = resolve_map_dir(options);
     std::cout << "mapdir: " << map_dir << "\n";
