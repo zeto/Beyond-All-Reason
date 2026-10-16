@@ -29,10 +29,16 @@ struct ModelMesh {
     std::vector<uint8_t> color_bc3;
     std::vector<uint8_t> other_bc3;
     int tex_size = 0;
+    // CUS normalTex (unitDef customParams.normaltex, else unittextures/blank_normal.dds), BC3 mip 0.
+    std::vector<uint8_t> normal_bc3;
+    int normal_size = 0;
 };
 
 // Piece-local vertices. pad0 is the piece index. Medals and the crown keep their nodes and drop their
 // vertices while the bind origin is below the model, so a script can Hide them without drawing them.
 bool load_s3o(const GameContent& content, const std::string& object_name, ModelMesh& mesh, std::string& error);
+
+// Reads a DXT5 tangent-space normal map by its VFS path (e.g. "unittextures/Arm_normal.dds").
+bool load_model_normal(const GameContent& content, const std::string& path, ModelMesh& mesh, std::string& error);
 
 }  // namespace bar

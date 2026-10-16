@@ -124,6 +124,31 @@ bool load_unit_object(const std::string& game_root, const std::string& def_name,
     return !object_name.empty();
 }
 
+bool load_unit_normaltex(const std::string& game_root, const std::string& def_name, std::string& path,
+                         std::string& error) {
+    path.clear();
+    lua_State* state = luaL_newstate();
+    if (state == nullptr) {
+        error = "luaL_newstate failed";
+        return false;
+    }
+    luaL_openlibs(state);
+    if (!open_unit_table(state, game_root, def_name, error)) {
+        lua_close(state);
+        return false;
+    }
+    lua_getfield(state, -1, "customparams");
+    if (lua_istable(state, -1)) {
+        lua_getfield(state, -1, "normaltex");
+        if (lua_isstring(state, -1)) {
+            path = lua_tostring(state, -1);
+        }
+        lua_pop(state, 1);
+    }
+    lua_close(state);
+    return true;
+}
+
 bool load_unit_yield(const std::string& game_root, const std::string& def_name, UnitYield& yield,
                      std::string& error) {
     yield = UnitYield{};

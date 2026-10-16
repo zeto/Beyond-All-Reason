@@ -69,6 +69,10 @@ std::string find_unit_file(const std::string& game_root, const std::string& def_
 bool load_unit_object(const std::string& game_root, const std::string& def_name, std::string& object_name,
                       std::string& error);
 
+// customparams.normaltex, empty when the def has none.
+bool load_unit_normaltex(const std::string& game_root, const std::string& def_name, std::string& path,
+                         std::string& error);
+
 bool load_unit_yield(const std::string& game_root, const std::string& def_name, UnitYield& yield, std::string& error);
 
 bool load_unit_extractor(const std::string& game_root, const std::string& def_name, UnitExtractor& extractor,

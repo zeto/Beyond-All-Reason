@@ -333,4 +333,12 @@ bool load_s3o(const GameContent& content, const std::string& object_name, ModelM
     return true;
 }
 
+bool load_model_normal(const GameContent& content, const std::string& path, ModelMesh& mesh, std::string& error) {
+    std::vector<uint8_t> dds;
+    if (!content.read(lower_copy(path), dds, error) && !content.read(path, dds, error)) {
+        return false;
+    }
+    return extract_bc3(dds, mesh.normal_bc3, mesh.normal_size, error);
+}
+
 }  // namespace bar

@@ -51,6 +51,8 @@ void append_placed(ModelMesh& dst, const ModelMesh& src) {
         dst.color_bc3 = src.color_bc3;
         dst.other_bc3 = src.other_bc3;
         dst.tex_size = src.tex_size;
+        dst.normal_bc3 = src.normal_bc3;
+        dst.normal_size = src.normal_size;
     }
     if (dst.pieces.empty()) {
         dst.pieces = src.pieces;
@@ -89,6 +91,17 @@ bool spawn_commanders(const std::string& game_root, const std::string& data_dir,
         ModelMesh loaded;
         if (!load_s3o(content, object_name, loaded, error)) {
             return false;
+        }
+        // cus_gl4 GetNormal: customParams.normaltex when the file exists, else blankNormalMap.
+        std::string normal_path;
+        if (!load_unit_normaltex(game_root, def_name, normal_path, error)) {
+            return false;
+        }
+        // blank_normal.dds is a 1x1 flat normal; an empty normal_bc3 renders the same tbn (0, 0, 1).
+        std::string normal_error;
+        if (!normal_path.empty() && !load_model_normal(content, normal_path, loaded, normal_error)) {
+            loaded.normal_bc3.clear();
+            loaded.normal_size = 0;
         }
         if (!model.color_bc3.empty() && loaded.tex_size != model.tex_size) {
             error = "a second unit uses a different texture";
