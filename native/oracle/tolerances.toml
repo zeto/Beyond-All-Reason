@@ -712,6 +712,7 @@ pve_slop = 1
 pve_map = 12288
 
 [m7]
+m7_flip = 0.22
 m7_build_x = 7416
 m7_build_z = 4888
 m7_build_slop = 1

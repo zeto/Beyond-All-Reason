@@ -8832,7 +8832,7 @@ void ppm_pixel(const std::vector<uint8_t>& rgb, int w, int h, int x, int y, int&
 
 bool log_has(const std::string& log, const char* needle) { return log.find(needle) != std::string::npos; }
 
-int gate_m7(const Options& options) {
+int gate_m7widgets(const Options& options) {
     // Mixed: Recoil traces under oracle/traces/ for sim-side select/build/minimap/health;
     // pixel/top-bar/ring/tooltip/Retina checks stay self-only.
     const std::string tolerance_path = options.oracle + "/tolerances.toml";
@@ -8950,7 +8950,7 @@ int gate_m7(const Options& options) {
               << (sel_ok ? "[1]" : "?") << " sim_x " << sim_x << "\n";
     if (!select_ok || !cursor_ok || !cmd_ok || !sel_ok || !select_log_ok || !moved_ok) {
         failure << "Selection failed. Need cursormove, cmd 10, sel [1], move to 8000 4900, sim_x > 7605.\n\n";
-        std::cout << "m7 FAIL select\n";
+        std::cout << "m7widgets FAIL select\n";
         return fail_write(1);
     }
 
@@ -8990,7 +8990,7 @@ int gate_m7(const Options& options) {
     }
     if (!select_oracle_ok || !select_oracle_match) {
         failure << "Oracle select_commander mismatch within " << mmap_slop << " elmos.\n\n";
-        std::cout << "m7 FAIL oracle-select\n";
+        std::cout << "m7widgets FAIL oracle-select\n";
         return fail_write(1);
     }
 
@@ -9014,7 +9014,7 @@ int gate_m7(const Options& options) {
     std::cout << "build " << build_def << " at " << bx << " " << bz << " nano " << static_cast<int>(building) << "\n";
     if (!build_ok || !def_ok || !bcmd_ok || !place_ok || !bxz_ok || !nano_ok || !start_ok || !build_log_ok) {
         failure << "Build failed. Need armmex cmd -13 at " << build_x << "," << build_z << " with nano id.\n\n";
-        std::cout << "m7 FAIL build\n";
+        std::cout << "m7widgets FAIL build\n";
         return fail_write(1);
     }
 
@@ -9060,7 +9060,7 @@ int gate_m7(const Options& options) {
     }
     if (!build_oracle_ok || !build_oracle_match) {
         failure << "Oracle build_mex mismatch within " << build_slop << ".\n\n";
-        std::cout << "m7 FAIL oracle-build\n";
+        std::cout << "m7widgets FAIL oracle-build\n";
         return fail_write(1);
     }
 
@@ -9081,7 +9081,7 @@ int gate_m7(const Options& options) {
               << "\n";
     if (!mmap_ok || !geo_ok || !move_ok || !mmap_log_ok) {
         failure << "Minimap failed. Need slave geometry and click near " << mmap_x << "," << mmap_z << ".\n\n";
-        std::cout << "m7 FAIL minimap\n";
+        std::cout << "m7widgets FAIL minimap\n";
         return fail_write(1);
     }
 
@@ -9114,7 +9114,7 @@ int gate_m7(const Options& options) {
     }
     if (!mmap_oracle_ok || !mmap_oracle_match) {
         failure << "Oracle minimap_move mismatch (Recoil equivalent CMD.MOVE) within " << mmap_slop << ".\n\n";
-        std::cout << "m7 FAIL oracle-minimap\n";
+        std::cout << "m7widgets FAIL oracle-minimap\n";
         return fail_write(1);
     }
 
@@ -9141,7 +9141,7 @@ int gate_m7(const Options& options) {
     std::cout << "hud tip " << tip << " hp " << health << "/" << max_health << " range " << hud_range << "\n";
     if (!hud_ok || !tip_ok || !hp_ok || !range_ok || !frac_ok || !hud_log_ok) {
         failure << "HUD status failed. Need armcom tip, half health, range " << range << ".\n\n";
-        std::cout << "m7 FAIL hud\n";
+        std::cout << "m7widgets FAIL hud\n";
         return fail_write(1);
     }
 
@@ -9169,7 +9169,7 @@ int gate_m7(const Options& options) {
     }
     if (!health_oracle_ok || !health_oracle_match) {
         failure << "Oracle health_range mismatch within health/range slop.\n\n";
-        std::cout << "m7 FAIL oracle-health\n";
+        std::cout << "m7widgets FAIL oracle-health\n";
         return fail_write(1);
     }
 
@@ -9180,12 +9180,12 @@ int gate_m7(const Options& options) {
     const std::string hend = options.actual + "/m7hud/hud-end.ppm";
     if (!read_ppm(hend, hw, hh, hrgb, himg_err) || hw != 1280 || hh != 720) {
         failure << "hud-end.ppm missing or wrong size: " << himg_err << "\n\n";
-        std::cout << "m7 FAIL hud-shot\n";
+        std::cout << "m7widgets FAIL hud-shot\n";
         return fail_write(1);
     }
     if (count_magenta(hrgb) != 0) {
         failure << "hud-end.ppm has magenta missing-texture pixels.\n\n";
-        std::cout << "m7 FAIL magenta\n";
+        std::cout << "m7widgets FAIL magenta\n";
         return fail_write(1);
     }
     int topbar_text = 0, wind_lit = 0, counter_lit = 0, income_colored = 0, income_edge = 0;
@@ -9249,7 +9249,7 @@ int gate_m7(const Options& options) {
         income_edge * 2 < income_colored) {
         failure << "Top bar text failed. topbar=" << topbar_text << " wind=" << wind_lit << " counter=" << counter_lit
                 << " income=" << income_colored << " edge=" << income_edge << "\n\n";
-        std::cout << "m7 FAIL topbar\n";
+        std::cout << "m7widgets FAIL topbar\n";
         return fail_write(1);
     }
 
@@ -9281,7 +9281,7 @@ int gate_m7(const Options& options) {
         med <= ring_med) {
         failure << "Range ring failed. count=" << orange.size() << " width=" << (maxx - minx) << " med=" << med
                 << "\n\n";
-        std::cout << "m7 FAIL ring\n";
+        std::cout << "m7widgets FAIL ring\n";
         return fail_write(1);
     }
 
@@ -9305,7 +9305,7 @@ int gate_m7(const Options& options) {
     std::cout << "tooltip pixels " << tip_hits << "\n";
     if (tip_hits < static_cast<int>(tip_hits_min)) {
         failure << "Tooltip text pixels near cursor: " << tip_hits << "\n\n";
-        std::cout << "m7 FAIL tooltip\n";
+        std::cout << "m7widgets FAIL tooltip\n";
         return fail_write(1);
     }
 
@@ -9313,7 +9313,7 @@ int gate_m7(const Options& options) {
     std::string win_log;
     if (!read_text(options.actual + "/m7window/run.log", win_log)) {
         failure << "m7window/run.log missing.\n\n";
-        std::cout << "m7 FAIL window-log\n";
+        std::cout << "m7widgets FAIL window-log\n";
         return fail_write(1);
     }
     int dw = 0, dh = 0;
@@ -9328,7 +9328,7 @@ int gate_m7(const Options& options) {
         win_log.find("attempt to perform arithmetic on local") != std::string::npos ||
         win_log.find("widgets view ") == std::string::npos || win_log.find("select box") == std::string::npos) {
         failure << "Retina window failed. drawable " << dw << "x" << dh << "\n\n";
-        std::cout << "m7 FAIL window\n";
+        std::cout << "m7widgets FAIL window\n";
         return fail_write(1);
     }
     int ww = 0, wh = 0;
@@ -9336,12 +9336,12 @@ int gate_m7(const Options& options) {
     std::string werr;
     if (!read_ppm(options.actual + "/m7window/window-end.ppm", ww, wh, wrgb, werr) || ww != dw || wh != dh) {
         failure << "window-end.ppm missing or size mismatch: " << werr << "\n\n";
-        std::cout << "m7 FAIL window-shot\n";
+        std::cout << "m7widgets FAIL window-shot\n";
         return fail_write(1);
     }
     if (count_magenta(wrgb) != 0) {
         failure << "window-end.ppm has magenta pixels.\n\n";
-        std::cout << "m7 FAIL window-magenta\n";
+        std::cout << "m7widgets FAIL window-magenta\n";
         return fail_write(1);
     }
     // Minimap marker green-ish in top-left panel
@@ -9400,7 +9400,7 @@ int gate_m7(const Options& options) {
         top_flat > static_cast<int>(wh * topbar_frac) || top_flat < 4) {
         failure << "Window HUD failed. marker=" << marker_hits << " topbar_text=" << w_topbar
                 << " topbar_rows=" << top_flat << "\n\n";
-        std::cout << "m7 FAIL window-hud\n";
+        std::cout << "m7widgets FAIL window-hud\n";
         return fail_write(1);
     }
 
@@ -9411,7 +9411,7 @@ int gate_m7(const Options& options) {
         std::string err;
         if (!read_ppm(options.actual + shot, w, h, rgb, err) || w != 1280 || h != 720 || count_magenta(rgb) != 0) {
             failure << "Shot " << shot << " failed: " << err << "\n\n";
-            std::cout << "m7 FAIL shot " << shot << "\n";
+            std::cout << "m7widgets FAIL shot " << shot << "\n";
             return fail_write(1);
         }
     }
@@ -9424,6 +9424,88 @@ int gate_m7(const Options& options) {
                "red without reference pictures. The M4/M5/M6 milestones stay red until their Recoil traces exist.\n";
     std::ofstream passed(options.oracle + "/last_failure.md");
     passed << failure.str();
+    std::cout << "m7widgets PASS\n";
+    return 0;
+}
+
+
+
+int gate_m7(const Options& options) {
+    // Official M7 exit per plan.md: checklist complete + HUD bookmarks under FLIP 0.22.
+    // Widget layers are scored by gate --suite m7widgets. This suite stays red until
+    // checklist reports and FLIP bookmark refs exist and pass.
+    const std::string tolerance_path = options.oracle + "/tolerances.toml";
+    std::string tolerance_text;
+    double flip_bar = 0.22;
+    if (!read_text(tolerance_path, tolerance_text)) {
+        std::cerr << "gate: tolerances missing\n";
+        return 2;
+    }
+    toml_number(tolerance_text, "m7_flip", flip_bar);
+
+    std::ostringstream failure;
+    failure << "# m7\n\n";
+    failure << "Scenario: M7 player checklist + HUD FLIP bookmarks\n\n";
+    failure << "Plan exit: checklist complete, HUD bookmarks under the M7 FLIP bar ("
+            << flip_bar << ").\n\n";
+
+    auto fail_write = [&](int code) {
+        std::ofstream packet(options.oracle + "/last_failure.md");
+        packet << failure.str();
+        return code;
+    };
+
+    // Checklist report written by check_m7checklist.sh (or individual item scripts).
+    std::string checklist;
+    const std::string checklist_path = options.actual + "/m7checklist/checklist.json";
+    if (!read_text(checklist_path, checklist)) {
+        failure << "Native value: checklist report missing at `" << checklist_path << "`.\n\n";
+        failure << "Oracle value: plan checklist items must all pass.\n";
+        std::cout << "m7 FAIL checklist missing\n";
+        return fail_write(1);
+    }
+    const char* items[] = {"click_select", "drag_box", "shift_queue", "attack", "facing",
+                           "control_groups", "pause", "gamespeed", "reclaim", "repair"};
+    bool checklist_ok = true;
+    for (const char* item : items) {
+        const std::string key = std::string("\"") + item + "\":";
+        const auto at = checklist.find(key);
+        bool pass = false;
+        if (at != std::string::npos) {
+            const auto val = checklist.find_first_not_of(" \t", at + key.size());
+            if (val != std::string::npos && checklist.compare(val, 4, "true") == 0) {
+                pass = true;
+            }
+        }
+        std::cout << "checklist " << item << (pass ? " ok\n" : " FAIL\n");
+        if (!pass) {
+            checklist_ok = false;
+            failure << "Checklist item `" << item << "` is not true in `" << checklist_path << "`.\n\n";
+        }
+    }
+    if (!checklist_ok) {
+        std::cout << "m7 FAIL checklist\n";
+        return fail_write(1);
+    }
+
+    // HUD FLIP bookmarks: require reference shots and scores under m7_flip.
+    const std::string flip_report = options.actual + "/m7flip/flip.json";
+    std::string flip_txt;
+    if (!read_text(flip_report, flip_txt)) {
+        failure << "Native value: FLIP report missing at `" << flip_report << "`.\n\n";
+        failure << "Oracle value: HUD bookmarks must score median FLIP <= " << flip_bar
+                << " against headed Recoil reference shots.\n";
+        std::cout << "m7 FAIL flip missing\n";
+        return fail_write(1);
+    }
+    double flip_median = 1.0;
+    if (!json_number_field(flip_txt, "median", flip_median) || flip_median > flip_bar) {
+        failure << "Native value: FLIP median " << flip_median << ".\n\n";
+        failure << "Tolerance: median FLIP <= " << flip_bar << ".\n";
+        std::cout << "m7 FAIL flip " << flip_median << "\n";
+        return fail_write(1);
+    }
+    std::cout << "flip median " << flip_median << " bar " << flip_bar << "\n";
     std::cout << "m7 PASS\n";
     return 0;
 }
@@ -9436,6 +9518,7 @@ int main(int argc, char** argv) {
     if (!parse(argc, argv, options)) {
         return 2;
     }
+
     if (options.suite == "m0") {
         return gate_m0(options);
     }
@@ -9534,6 +9617,9 @@ int main(int argc, char** argv) {
     }
     if (options.suite == "ai_10min") {
         return gate_ai10(options);
+    }
+    if (options.suite == "m7widgets") {
+        return gate_m7widgets(options);
     }
     if (options.suite == "m7") {
         return gate_m7(options);

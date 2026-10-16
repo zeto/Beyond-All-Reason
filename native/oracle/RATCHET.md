@@ -418,17 +418,11 @@ income 6.9099 and 6.9006, still above the same 0.01 floor, with both
 armcoms present. No floor moved. No Recoil resource trace was added.
 The M4 2% bar and the M5 15% time-to-kill bar have not moved.
 
-M7 introduced its own bar from the official `gate --suite m7` gate with
-Recoil traces on PIN 2026.07.04. Oracle-verified: select_commander
-CMD.MOVE params 8000,4900 and frame-60 position within m7_mmap_slop 250;
-build_mex armmex at 7416,4888 with a live nano within m7_build_slop 1
-(command ids differ by UnitDef table: Recoil -158 vs bar-metal -13);
-minimap_move as equivalent CMD.MOVE (no Recoil minimap click) within
-m7_mmap_slop; health_range health 1850/3700 and maxWeaponRange 300 within
-m7_health_slop 1 and m7_range_slop 1. Self-only pixels: top-bar text
-coverage at least 40, wind/counter pods at least 20/8 lit glyphs, income
-at least 20 colored with edge count at least half, orange ring 800..30000
-with median radius above 100, tooltip hits at least 30, Retina drawable
-at least 2800x1700, topbar grey rows within 10% of height, panel
-stability mean_diff under 25, magenta tiles 0. The ai_10min floors did
-not move. Those numbers have not moved.
+M7 widget layers keep the bars introduced for `gate --suite m7widgets`
+(select/build/minimap/health Recoil traces and self-only pixel floors).
+Those numbers have not moved.
+
+Official M7 is not green yet. The plan exit is checklist complete plus HUD
+FLIP bookmarks at or under `m7_flip` 0.22. `gate --suite m7` stays red
+until `m7checklist/checklist.json` and `m7flip/flip.json` both pass. The
+ai_10min floors and earlier milestone bars have not moved.

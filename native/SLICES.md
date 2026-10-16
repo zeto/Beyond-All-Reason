@@ -1313,43 +1313,42 @@ Frame 180 has 2 living units. The mode structure is on team 1 and inside
 the 12288 map. The `ai_10min` floors did not move. Do not lower these to
 make a gate green.
 
-## M7 HUD layer 1
+## M7 HUD
 
-A player sees the stock top resource bar (metal, energy, income, wind, com
-counter), box selection with a move cursor, the grid build menu with an
-armmex footprint preview, the slave minimap with a unit marker and
-click-to-move, a half-health bar and world range ring on the hovered
-commander, and an armcom tooltip. Retina/fullscreen keeps the top bar thin
-and the minimap marker visible. Only unit 0 is drawn. GL4 widgets stay
-deferred.
+Plan exit (authoritative): checklist complete, HUD bookmarks under the M7 FLIP
+bar (0.22, layout and information present; font raster may differ).
+
+### Widget layers (done)
+
+The five widget layers from the plan are implemented and verified by
+`gate --suite m7widgets` (formerly the premature `gate --suite m7`):
+
+1. Resource bar, selection, and order cursors
+2. Build menu and build preview on the terrain
+3. Minimap
+4. Health bars, range rings, tooltip
+5. Remaining default-on widgets exercised by the Retina/window self-check
 
 `check_m7select.sh`, `check_m7build.sh`, `check_m7minimap.sh`,
-`check_m7hud.sh`, and `check_m7window.sh` exited 0 on engine shots and
-JSON. `gate --suite m7` exited 0.
+`check_m7hud.sh`, and `check_m7window.sh` exited 0. `gate --suite m7widgets`
+exits 0 against recorded outs and Recoil traces `select_commander`,
+`build_mex`, `minimap_move` (equivalent CMD.MOVE), and `health_range`.
+Pixels for those layers stay self-only where no Recoil HUD framebuffer
+oracle exists. Only unit 0 is drawn. GL4 geometry-shader effects stay
+deferred to M8.
 
-Oracle-verified (Recoil 2026.07.04 traces under `oracle/traces/`):
-`select_commander` (CMD.MOVE 10 to 8000,4900; frame-60 position within
-`m7_mmap_slop`), `build_mex` (armmex at 7416,4888 with nano; compared by
-def+xz because `-UnitDef.id` is -158 in Recoil vs -13 in bar-metal),
-`minimap_move` (Recoil has no minimap click; recorded equivalent CMD.MOVE
-to 8000,4900; bar-metal click world within `m7_mmap_slop`),
-`health_range` (health 1850/3700, maxWeaponRange 300 within slop).
+### Outstanding for official M7
 
-Self-only (no Recoil pixel/HUD framebuffer oracle): top-bar text/wind/
-counter/income glyphs, orange range ring spread, tooltip pixels, Retina
-drawable and top-bar rows, magenta-free shots.
+- Player checklist: left-click select, drag box, shift-queue, right-click
+  move and attack, build facing with the existing key, control groups 1–9,
+  pause, gamespeed 1–4, reclaim and repair orders. Each item needs a
+  scripted self-check and, where sim-side, a Recoil trace on PIN.
+- HUD FLIP bookmarks under bar 0.22 against headed Recoil reference shots.
 
-The same binary re-ran the corpus: `gate --suite m2`, `gate --suite m3`,
-`gate --suite m5laser`, `gate --suite m6ai`, `gate --suite pve`, and
-`gate --suite m7` exited 0, and `gate --suite ai_10min` was last and
-exited 0. Frame 18000 had 116 units, both armcoms, mex income 6.9099 and
-6.9006, winner none.
-
-m1 stays red without reference pictures. The M4 milestone stays red until
-a Recoil trace matches `eco_t1`, `build_tank`, and `reclaim` at 2%. The M5
-milestone stays red until the duel corpus is within 15% time to kill of a
-Recoil trace. The M6 milestone stays red until a Recoil trace shows the
-10-minute resource totals within 15%.
+`gate --suite m7` is the official suite: it requires
+`oracle/out/m7checklist/checklist.json` with every checklist item true and
+`oracle/out/m7flip/flip.json` with median FLIP <= `m7_flip` (0.22). It is
+red until both exist and pass. Do not call M7 green on widget layers alone.
 
 Directories: `native/ui`, `native/lua/gl`, `native/rhi/metal4`,
 `native/shell`, `native/tools/gate`, `native/tools/check_m7*.sh`,
@@ -1360,12 +1359,5 @@ path, the team tick, or the stock game tree. Do not draw projectiles,
 billboards, wrecks, or extra unit meshes. Do not stub gadget or widget
 bodies. Do not implement the whole Spring or gl surface up front.
 
-Tolerance: top-bar text pixels >= 40 on end frames; wind and counter
-pods lit; income glyphs show colored fill with crisp edges
-(`income_edge * 2 >= income_colored`). Selection `sel == [1]`, cursor
-`cursormove`, cmd 10. Build places `armmex` at 7416, 4888 with nano id.
-Minimap click moves within 250 elmos of 8000, 4900. HUD hover tip is
-armcom, health half of max, range 300, orange ring spread not a filled
-blob. Retina drawable >= 2800x1700, topbar_rows within 10% of height,
-panel stable mean_diff < 25. Magenta missing-texture pixels stay 0.
-`ai_10min` floors did not move. Do not lower these to make a gate green.
+Tolerance: widget-layer bars in `[m7]` are unchanged. Official exit adds
+`m7_flip = 0.22`. Do not lower these to make a gate green.

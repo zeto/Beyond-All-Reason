@@ -1,6 +1,6 @@
 {
   "milestone": "M7",
-  "slice": "hud",
+  "slice": "checklist",
   "iteration": 1,
-  "last_gate": "oracle-pass"
+  "last_gate": "red"
 }
