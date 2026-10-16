@@ -921,13 +921,15 @@ bool build_mesh(const std::vector<uint8_t>& smf, const MapInfo& info, TerrainMes
         }
     }
 
-    constexpr int kWater = 32;
+    // CBasicWater::GenWaterQuadsRB: 16 x 16 quads at y = 0 over the map. uv is the map
+    // fraction; the renderer applies the texture repeat once the water texture size is known.
+    constexpr int kWater = 16;
     mesh.water_vertices.resize(static_cast<size_t>(kWater + 1) * (kWater + 1));
     for (int iz = 0; iz <= kWater; ++iz) {
         for (int ix = 0; ix <= kWater; ++ix) {
             TerrainVertex& vertex = mesh.water_vertices[static_cast<size_t>(iz) * (kWater + 1) + ix];
             vertex.px = mesh.world_x * static_cast<float>(ix) / kWater;
-            vertex.py = 0.05f;
+            vertex.py = 0.f;
             vertex.pz = mesh.world_z * static_cast<float>(iz) / kWater;
             vertex.pad0 = 0;
             vertex.nx = 0;

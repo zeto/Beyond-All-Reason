@@ -73,6 +73,8 @@ struct Options {
     std::string input;
     std::string pieces;
     bool lock_camera = false;
+    // FILE#ID: with --lock-camera, hold that bookmark camera instead of following unit 0.
+    std::string fixed_camera;
     bool check_hud_text = false;
     int frames = 0;
 };
@@ -161,6 +163,12 @@ bool parse_args(int argc, char** argv, Options& options) {
                 return false;
             }
             options.pieces = value;
+        } else if (arg == "--fixed-camera") {
+            const char* value = need("--fixed-camera");
+            if (value == nullptr) {
+                return false;
+            }
+            options.fixed_camera = value;
         } else if (arg == "--lock-camera") {
             options.lock_camera = true;
         } else if (arg == "--check-hud-text") {
@@ -394,6 +402,7 @@ int run_terrain(const Options& options, const std::string& game_name) {
         std::cerr << "terrain: " << error << "\n";
         return 1;
     }
+    mesh.game_root = options.game_root;
     std::cout << "world: " << mesh.world_x << " x " << mesh.world_z << "\n";
     std::cout << "heights: " << mesh.min_height << " .. " << mesh.max_height
               << (mesh.height_from_mapinfo ? " (mapinfo)" : " (smf header)") << "\n";
@@ -775,6 +784,28 @@ int run_terrain(const Options& options, const std::string& game_name) {
     }
 
     std::vector<bar::Bookmark> shots;
+    bool have_fixed_camera = false;
+    bar::Camera fixed_camera;
+    if (!options.fixed_camera.empty()) {
+        const size_t hash = options.fixed_camera.find('#');
+        std::vector<bar::Bookmark> fixed_shots;
+        if (hash == std::string::npos ||
+            !bar::load_bookmarks(options.fixed_camera.substr(0, hash), script.map_name, fixed_shots, error)) {
+            std::cerr << "fixed camera: " << (hash == std::string::npos ? "expected FILE#ID" : error) << "\n";
+            return 1;
+        }
+        const std::string want = options.fixed_camera.substr(hash + 1);
+        for (const bar::Bookmark& shot : fixed_shots) {
+            if (shot.id == want) {
+                fixed_camera = shot.camera;
+                have_fixed_camera = true;
+            }
+        }
+        if (!have_fixed_camera) {
+            std::cerr << "fixed camera: no bookmark " << want << "\n";
+            return 1;
+        }
+    }
     if (!options.bookmarks.empty()) {
         if (!bar::load_bookmarks(options.bookmarks, script.map_name, shots, error)) {
             std::cerr << "bookmarks: " << error << "\n";
@@ -1090,6 +1121,14 @@ int run_terrain(const Options& options, const std::string& game_name) {
             if (!locked) {
                 bar::camera_apply_input(camera, input);
                 camera.eye_lift = 0;
+            } else if (have_fixed_camera) {
+                camera.target_x = fixed_camera.target_x;
+                camera.target_y = fixed_camera.target_y;
+                camera.target_z = fixed_camera.target_z;
+                camera.distance = fixed_camera.distance;
+                camera.tilt = fixed_camera.tilt;
+                camera.yaw = fixed_camera.yaw;
+                camera.eye_lift = 0.f;
             } else if (!sim.x.empty()) {
                 camera.target_x = sim.x[0];
                 camera.target_y = sim.y[0] + 30.f;

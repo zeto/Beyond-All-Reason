@@ -3,8 +3,20 @@
 #include "smf.h"
 #include "../vfs/archive.h"
 
+extern "C" {
+#include "lauxlib.h"
+#include "lua.h"
+#include "lualib.h"
+}
+
+#include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
+
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 
 namespace bar {
 namespace {
@@ -301,6 +313,170 @@ void build_rgba_mips(GpuImage& image) {
     }
 }
 
+namespace {
+
+// JPEG/PNG/BMP through ImageIO into straight RGBA8, row 0 = first stored row (CBitmap order).
+bool decode_imageio_rgba(const std::vector<uint8_t>& bytes, GpuImage& out) {
+    CFDataRef data = CFDataCreate(nullptr, bytes.data(), static_cast<CFIndex>(bytes.size()));
+    if (data == nullptr) {
+        return false;
+    }
+    CGImageSourceRef src = CGImageSourceCreateWithData(data, nullptr);
+    CFRelease(data);
+    if (src == nullptr) {
+        return false;
+    }
+    CGImageRef image = CGImageSourceCreateImageAtIndex(src, 0, nullptr);
+    CFRelease(src);
+    if (image == nullptr) {
+        return false;
+    }
+    const int width = static_cast<int>(CGImageGetWidth(image));
+    const int height = static_cast<int>(CGImageGetHeight(image));
+    std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4, 0);
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(rgba.data(), width, height, 8, width * 4, space,
+                                             kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(space);
+    if (ctx == nullptr) {
+        CGImageRelease(image);
+        return false;
+    }
+    CGContextSetBlendMode(ctx, kCGBlendModeCopy);
+    CGContextDrawImage(ctx, CGRectMake(0, 0, width, height), image);
+    CGContextRelease(ctx);
+    CGImageRelease(image);
+    out.format = GpuImage::Format::RGBA8;
+    out.width = width;
+    out.height = height;
+    out.faces = 1;
+    out.levels.assign(1, std::move(rgba));
+    return width > 0 && height > 0;
+}
+
+// VFS.DirList(dir, pattern, mode, recursive) over the game tree: forward-slash paths
+// relative to the game root, recursive when asked. resources.lua lists its bitmaps with it.
+int vfs_dir_list(lua_State* state) {
+    const char* dir = luaL_checkstring(state, 1);
+    const bool recursive = lua_toboolean(state, 4) != 0;
+    lua_getfield(state, LUA_REGISTRYINDEX, "bar_game_root");
+    const std::string root = lua_isstring(state, -1) ? lua_tostring(state, -1) : "";
+    lua_pop(state, 1);
+    lua_newtable(state);
+    std::error_code ec;
+    const std::filesystem::path base = std::filesystem::path(root) / dir;
+    if (!std::filesystem::is_directory(base, ec)) {
+        return 1;
+    }
+    std::vector<std::string> files;
+    auto add = [&](const std::filesystem::directory_entry& entry) {
+        if (entry.is_regular_file(ec)) {
+            files.push_back(std::filesystem::relative(entry.path(), root, ec).generic_string());
+        }
+    };
+    if (recursive) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(base, ec)) {
+            add(entry);
+        }
+    } else {
+        for (const auto& entry : std::filesystem::directory_iterator(base, ec)) {
+            add(entry);
+        }
+    }
+    std::sort(files.begin(), files.end());
+    for (size_t i = 0; i < files.size(); ++i) {
+        lua_pushstring(state, files[i].c_str());
+        lua_rawseti(state, -2, static_cast<int>(i + 1));
+    }
+    return 1;
+}
+
+// resources.lua graphics.maps.watertex, or Recoil's "ocean.jpg" when the game sets none.
+std::string resources_watertex(const std::string& game_root) {
+    std::string tex = "ocean.jpg";
+    lua_State* state = luaL_newstate();
+    if (state == nullptr) {
+        return tex;
+    }
+    luaL_openlibs(state);
+    lua_pushstring(state, game_root.c_str());
+    lua_setfield(state, LUA_REGISTRYINDEX, "bar_game_root");
+    lua_newtable(state);
+    lua_pushcfunction(state, vfs_dir_list);
+    lua_setfield(state, -2, "DirList");
+    lua_setglobal(state, "VFS");
+    const std::string path = game_root + "/gamedata/resources.lua";
+    if (luaL_dofile(state, path.c_str()) == 0 && lua_istable(state, -1)) {
+        lua_getfield(state, -1, "graphics");
+        if (lua_istable(state, -1)) {
+            lua_getfield(state, -1, "maps");
+            if (lua_istable(state, -1)) {
+                lua_getfield(state, -1, "watertex");
+                if (lua_isstring(state, -1)) {
+                    tex = lua_tostring(state, -1);
+                }
+                lua_pop(state, 1);
+            }
+            lua_pop(state, 1);
+        }
+        lua_pop(state, 1);
+    }
+    lua_close(state);
+    return tex;
+}
+
+bool read_disk_file(const std::string& path, std::vector<uint8_t>& out) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return false;
+    }
+    out.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    return !out.empty();
+}
+
+// MapInfo: FIND_MAP_TEXTURE(texture) (else "maps/" + texture) in the map; with no texture key,
+// FIND_MAP_TEXTURE(watertex, "bitmaps/") in the game VFS.
+void load_water_texture(const TerrainMesh& mesh, TerrainTextures& out) {
+    std::vector<uint8_t> bytes;
+    if (!mesh.water.texture.empty()) {
+        if (read_map_file(mesh.archive_path, mesh.water.texture, bytes)) {
+            out.water_path = mesh.water.texture;
+        }
+    } else if (!mesh.game_root.empty()) {
+        const std::string tex = resources_watertex(mesh.game_root);
+        if (read_disk_file(mesh.game_root + "/" + tex, bytes)) {
+            out.water_path = tex;
+        } else if (read_disk_file(mesh.game_root + "/bitmaps/" + tex, bytes)) {
+            out.water_path = "bitmaps/" + tex;
+        }
+    }
+    if (bytes.empty()) {
+        return;
+    }
+    const std::string ext = lower_ext(out.water_path);
+    std::string ignored;
+    bool ok = false;
+    if (ext == "dds") {
+        ok = decode_dds_blocks(bytes, out.water, ignored);
+    } else if (ext == "tga") {
+        ok = decode_tga(bytes, out.water, ignored);
+        if (ok) {
+            build_rgba_mips(out.water);
+        }
+    } else {
+        ok = decode_imageio_rgba(bytes, out.water);
+        if (ok) {
+            build_rgba_mips(out.water);
+        }
+    }
+    if (!ok) {
+        out.water = GpuImage{};
+        out.water_path.clear();
+    }
+}
+
+}  // namespace
+
 bool load_terrain_textures(const TerrainMesh& mesh, TerrainTextures& out, std::string& error) {
     if (!load_diffuse(mesh, out.diffuse, error)) {
         return false;
@@ -311,6 +487,7 @@ bool load_terrain_textures(const TerrainMesh& mesh, TerrainTextures& out, std::s
     out.normals.levels.assign(1, std::vector<uint8_t>(mesh.normals_xz.size() * 2));
     std::memcpy(out.normals.levels[0].data(), mesh.normals_xz.data(), mesh.normals_xz.size() * 2);
 
+    load_water_texture(mesh, out);
     if (!mesh.sky_box.empty()) {
         std::string sky_error;
         if (!load_image(mesh.archive_path, mesh.sky_box, out.sky_box, sky_error) || out.sky_box.faces != 6) {

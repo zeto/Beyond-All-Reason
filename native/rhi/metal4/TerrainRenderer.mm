@@ -80,13 +80,15 @@ struct TerrainUniforms {
     float sky_inv[16];
     // Water planeColor (xyz), w 1 when the map has a water plane (CubeMapFS.glsl).
     float plane_color[4];
+    // CBasicWater: xy texture repeats over the map (repeatX/Y or the default), z 1 with a texture.
+    float water_repeat[4];
 };
 
 // terrain_fs texture slots. Slot 2 is the shadow map.
 enum GroundSlot { kGroundDiffuse = 0, kGroundNormals = 1, kGroundSpecular = 3, kGroundSplatDistr = 4,
                   kGroundBlendNormals = 5, kGroundSplatNormal0 = 6, kGroundSlots = 10 };
 // Above the ground slots: atmosphere.skyBox cube and the $reflection cube (model_fs).
-enum { kSkyCubeSlot = 10, kReflectionSlot = 11, kTextureSlots = 12 };
+enum { kSkyCubeSlot = 10, kReflectionSlot = 11, kWaterSlot = 12, kTextureSlots = 13 };
 // Recoil CubeTexSizeReflection default; the oracle config does not set it, and BAR's
 // api_pbr_enabler only changes the config after the cubemap exists.
 constexpr NSUInteger kReflectionSize = 128;
@@ -141,6 +143,8 @@ struct TerrainRenderer::Impl {
     int reflection_face = 0;
     bool reflection_primed = false;
     float plane_color[4] = {0, 0, 0, 0};
+    id<MTLTexture> water_tex = nil;
+    float water_repeat[4] = {0, 0, 0, 0};
     id<MTLSamplerState> sampler = nil;
     id<MTLTexture> depth = nil;
     id<MTLTexture> offscreen = nil;
@@ -326,6 +330,9 @@ struct SceneBindings {
     id<MTLTexture> reflection;
     id<MTLRenderPipelineState> sky_pipeline;
     id<MTLDepthStencilState> sky_depth;
+    id<MTLTexture> water_tex;
+    // ReadMap::HasVisibleWater (some ground below 0); BasicWater skips the draw otherwise.
+    bool water_visible = false;
     id<MTLBuffer> pieces;
     id<MTLTexture> shadow_map;
     const id<MTLTexture>* ground;
@@ -746,14 +753,19 @@ void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, i
                       indexBufferLength:scene.model_indices.length];
     }
 
-    [scene.arguments setAddress:scene.water_vertices.gpuAddress atIndex:1];
-    [encoder setRenderPipelineState:scene.water_pipeline];
-    [encoder setDepthStencilState:scene.water_depth];
-    [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                         indexCount:scene.water_index_count
-                          indexType:MTLIndexTypeUInt32
-                        indexBuffer:scene.water_indices.gpuAddress
-                  indexBufferLength:scene.water_indices.length];
+    if (scene.water_visible) {
+        if (scene.water_tex != nil) {
+            [scene.arguments setTexture:scene.water_tex.gpuResourceID atIndex:kWaterSlot];
+        }
+        [scene.arguments setAddress:scene.water_vertices.gpuAddress atIndex:1];
+        [encoder setRenderPipelineState:scene.water_pipeline];
+        [encoder setDepthStencilState:scene.water_depth];
+        [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                             indexCount:scene.water_index_count
+                              indexType:MTLIndexTypeUInt32
+                            indexBuffer:scene.water_indices.gpuAddress
+                      indexBufferLength:scene.water_indices.length];
+    }
 
     // Mex rings sit after the water so spots on the sea stay visible.
     if (scene.metal_hud && scene.ring_index_count > 0 && scene.ring_vertices != nil && scene.ring_indices != nil &&
@@ -1722,6 +1734,21 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
         impl_->ground[kGroundSpecular] = upload_image(impl_->device, textures.specular);
         impl_->ground[kGroundBlendNormals] = upload_image(impl_->device, textures.blend_normals);
         impl_->sky_cube = upload_image(impl_->device, textures.sky_box);
+        impl_->water_tex = upload_image(impl_->device, textures.water);
+        if (impl_->water_tex != nil) {
+            // CBasicWater::GenWaterQuadsRB repeat; the ocean.jpg divide applies to that exact path only.
+            float repeat_x = 65536.f / static_cast<float>(mesh.map_x);
+            float repeat_y = 65536.f / static_cast<float>(mesh.map_y) * textures.water.width / textures.water.height;
+            if (textures.water_path == "bitmaps/ocean.jpg") {
+                repeat_x /= 4.f;
+                repeat_y /= 4.f;
+            }
+            impl_->water_repeat[0] = mesh.water.repeat_x != 0.f ? mesh.water.repeat_x : repeat_x;
+            impl_->water_repeat[1] = mesh.water.repeat_y != 0.f ? mesh.water.repeat_y : repeat_y;
+            impl_->water_repeat[2] = 1.f;
+        }
+        std::fprintf(stderr, "water texture: %s %dx%d repeat %.3f %.3f\n", textures.water_path.c_str(),
+                     textures.water.width, textures.water.height, impl_->water_repeat[0], impl_->water_repeat[1]);
         const bool splat = textures.splat_normal_count == 4 && textures.splat_distr.valid();
         if (splat) {
             impl_->ground[kGroundSplatDistr] = upload_image(impl_->device, textures.splat_distr);
@@ -1854,6 +1881,9 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
     [impl_->residency addAllocation:impl_->reflection_depth];
     if (impl_->sky_cube != nil) {
         [impl_->residency addAllocation:impl_->sky_cube];
+    }
+    if (impl_->water_tex != nil) {
+        [impl_->residency addAllocation:impl_->water_tex];
     }
     for (int i = 0; i < kGroundSlots; ++i) {
         bool seen = false;
@@ -2102,6 +2132,7 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     uniforms.unit_frame[1] = 0.f;
     uniforms.unit_frame[2] = impl_->model_normal != nil ? 1.f : 0.f;
     std::memcpy(uniforms.plane_color, impl_->plane_color, sizeof(uniforms.plane_color));
+    std::memcpy(uniforms.water_repeat, impl_->water_repeat, sizeof(uniforms.water_repeat));
     if (!invert4(uniforms.view_proj, uniforms.sky_inv)) {
         std::memset(uniforms.sky_inv, 0, sizeof(uniforms.sky_inv));
     }
@@ -2263,6 +2294,8 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     scene.reflection = impl_->reflection;
     scene.sky_pipeline = impl_->sky_pipeline;
     scene.sky_depth = impl_->sky_depth;
+    scene.water_tex = impl_->water_tex;
+    scene.water_visible = impl_->map[2] > 0.5f;
     scene.pieces = slot.pieces;
     scene.shadow_map = impl_->shadow_map;
     scene.ground = impl_->ground;

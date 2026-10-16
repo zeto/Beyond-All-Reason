@@ -68,6 +68,8 @@ struct TerrainMesh {
     float unit_diffuse[3] = {0.7f, 0.7f, 0.7f};
     float unit_specular[3] = {0.7f, 0.7f, 0.7f};
     float sky[3] = {0.43f, 0.58f, 0.64f};
+    // Game tree root (BAR gamedata/resources.lua and bitmaps/), set by the shell.
+    std::string game_root;
     // atmosphere.skyBox (Recoil loads "maps/" + name). Empty when the map has none.
     std::string sky_box;
     // mapinfo lighting groundShadowDensity / unitShadowDensity (Recoil default 0.8, clamped 0..1).

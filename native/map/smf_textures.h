@@ -36,6 +36,10 @@ struct TerrainTextures {
     // atmosphere.skyBox cubemap, faces as stored (nv_dds's per-face flip, the +Y/-Y swap and
     // the SkyBox shader's uvFlip (1, -1, 1) cancel, so stored faces sample at the true direction).
     GpuImage sky_box;
+    // CBasicWater texture: water.texture from mapinfo, else resources.lua graphics.maps.watertex
+    // under bitmaps/ (Recoil default "ocean.jpg"). RGBA8 with a box-filtered mip chain.
+    GpuImage water;
+    std::string water_path;
 };
 
 bool load_terrain_textures(const TerrainMesh& mesh, TerrainTextures& out, std::string& error);

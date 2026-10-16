@@ -36,6 +36,7 @@ struct Uniforms {
     float4x4 sky_inv;
     // Water planeColor; w 1 when the map has a water plane.
     float4 plane_color;
+    float4 water_repeat;
 };
 
 // Recoil CGlobalRendering::SMF_INTENSITY_MULT.
@@ -459,10 +460,19 @@ fragment float4 sky_fs(SkyOut in [[stage_in]],
     return float4(mix(tex.rgb, u.plane_color.rgb, below), 1.0);
 }
 
-fragment float4 water_fs(Varying in [[stage_in]], constant Uniforms& uniforms [[buffer(0)]]) {
-    float ndotl = saturate(dot(normalize(in.normal), uniforms.sun_dir.xyz));
-    float3 color = float3(0.05, 0.42, 0.48) * (0.45 + 0.9 * ndotl);
-    return float4(color, 0.72);
+// CBasicWater::Draw: the water texture (mipmapped, GL_REPEAT) times ucolor (0.7, 0.7, 0.7, 0.5),
+// alpha-blended with depth writes off. Fog is skipped like the ground (fogStart 0.8).
+fragment float4 water_fs(Varying in [[stage_in]],
+                         constant Uniforms& uniforms [[buffer(0)]],
+                         texture2d<float> water_tex [[texture(12)]]) {
+    constexpr sampler water_s(coord::normalized, filter::linear, mip_filter::linear, address::repeat);
+    const float4 ucolor = float4(0.7, 0.7, 0.7, 0.5);
+    // CBitmap::AllocDummy(SColor(0, 0, 255, 255)) when the texture is missing.
+    float4 tex = float4(0.0, 0.0, 1.0, 1.0);
+    if (uniforms.water_repeat.z > 0.5) {
+        tex = water_tex.sample(water_s, in.uv * uniforms.water_repeat.xy);
+    }
+    return tex * ucolor;
 }
 
 // Free mex ring. gui_metalspots uses rgb (0, 1, 0.5) and fades the ring near alpha 0.5.
