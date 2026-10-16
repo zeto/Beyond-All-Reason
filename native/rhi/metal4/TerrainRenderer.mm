@@ -55,7 +55,12 @@ struct TerrainUniforms {
     float team[4];
     float model_pose[4];
     float marker[4];
+    float shadow_vp[16];
+    float shadow[4];
 };
+
+// Shadow map edge in texels. One map covers the whole visible ground (no cascades yet), so 4096.
+constexpr NSUInteger kShadowSize = 4096;
 
 struct TerrainRenderer::Impl {
     id<MTLDevice> device = nil;
@@ -70,6 +75,13 @@ struct TerrainRenderer::Impl {
     id<MTLRenderPipelineState> hud_color_pipeline = nil;
     id<MTLRenderPipelineState> hud_text_pipeline = nil;
     id<MTLRenderPipelineState> hud_image_pipeline = nil;
+    id<MTLRenderPipelineState> shadow_terrain_pipeline = nil;
+    id<MTLRenderPipelineState> shadow_model_pipeline = nil;
+    id<MTLTexture> shadow_map = nil;
+    float ground_shadow_density = 0.8f;
+    float unit_shadow_density = 0.8f;
+    float height_min = 0.f;
+    float height_max = 0.f;
     std::unordered_map<int, id<MTLTexture>> hud_images;
     id<MTLDepthStencilState> terrain_depth = nil;
     id<MTLDepthStencilState> water_depth = nil;
@@ -253,12 +265,178 @@ struct SceneBindings {
     id<MTLTexture> model_color;
     id<MTLTexture> model_other;
     id<MTLBuffer> pieces;
+    id<MTLTexture> shadow_map;
+    id<MTLRenderPipelineState> shadow_terrain_pipeline;
+    id<MTLRenderPipelineState> shadow_model_pipeline;
     NSUInteger index_count;
     NSUInteger water_index_count;
     NSUInteger ring_index_count;
     NSUInteger model_index_count;
     bool metal_hud = false;
 };
+
+bool model_drawable(const SceneBindings& scene) {
+    return scene.model_index_count > 0 && scene.model_vertices != nil && scene.model_indices != nil &&
+           scene.model_color != nil && scene.model_other != nil && scene.model_pipeline != nil && scene.pieces != nil;
+}
+
+// Sun-space depth of the terrain and unit 0. The colour pass samples it at texture 2.
+void encode_shadow(id<MTL4CommandBuffer> command_buffer, const SceneBindings& scene) {
+    MTL4RenderPassDescriptor* pass = [MTL4RenderPassDescriptor new];
+    pass.depthAttachment.texture = scene.shadow_map;
+    pass.depthAttachment.loadAction = MTLLoadActionClear;
+    pass.depthAttachment.storeAction = MTLStoreActionStore;
+    pass.depthAttachment.clearDepth = 1.0;
+    pass.renderTargetWidth = scene.shadow_map.width;
+    pass.renderTargetHeight = scene.shadow_map.height;
+    id<MTL4RenderCommandEncoder> encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
+    MTLViewport viewport{0, 0, static_cast<double>(scene.shadow_map.width),
+                         static_cast<double>(scene.shadow_map.height), 0, 1};
+    [encoder setViewport:viewport];
+    [encoder setCullMode:MTLCullModeNone];
+    [encoder setArgumentTable:scene.arguments atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+    [encoder setDepthStencilState:scene.terrain_depth];
+    [scene.arguments setAddress:scene.vertices.gpuAddress atIndex:1];
+    [encoder setRenderPipelineState:scene.shadow_terrain_pipeline];
+    [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                         indexCount:scene.index_count
+                          indexType:MTLIndexTypeUInt32
+                        indexBuffer:scene.indices.gpuAddress
+                  indexBufferLength:scene.indices.length];
+    if (model_drawable(scene)) {
+        [scene.arguments setAddress:scene.model_vertices.gpuAddress atIndex:1];
+        [scene.arguments setAddress:scene.pieces.gpuAddress atIndex:2];
+        [encoder setRenderPipelineState:scene.shadow_model_pipeline];
+        [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                             indexCount:scene.model_index_count
+                              indexType:MTLIndexTypeUInt32
+                            indexBuffer:scene.model_indices.gpuAddress
+                      indexBufferLength:scene.model_indices.length];
+    }
+    [encoder barrierAfterStages:MTLStageVertex | MTLStageFragment
+              beforeQueueStages:MTLStageFragment
+              visibilityOptions:MTL4VisibilityOptionDevice];
+    [encoder endEncoding];
+}
+
+bool invert4(const float m[16], float out[16]) {
+    float inv[16];
+    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+    float det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (std::fabs(det) < 1e-20f) {
+        return false;
+    }
+    det = 1.f / det;
+    for (int i = 0; i < 16; ++i) {
+        out[i] = inv[i] * det;
+    }
+    return true;
+}
+
+// Orthographic sun projection fitted to the part of the ground the camera sees.
+// Each screen-corner ray is cut at the height band [height_min, height_max] (and at
+// kReach elmos), the hits are bounded in sun space, and the depth range is pushed
+// back toward the sun so off-screen cliffs still cast into view.
+bool fit_shadow(const float view_proj[16], const float sun[3], float height_min, float height_max, float out[16]) {
+    constexpr float kReach = 6000.f;
+    float inv[16];
+    if (!invert4(view_proj, inv)) {
+        return false;
+    }
+    auto unproject = [&](float x, float y, float z, float p[3]) {
+        const float v[4] = {x, y, z, 1.f};
+        float r[4] = {0, 0, 0, 0};
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                r[row] += inv[col * 4 + row] * v[col];
+            }
+        }
+        p[0] = r[0] / r[3];
+        p[1] = r[1] / r[3];
+        p[2] = r[2] / r[3];
+    };
+    // Sun basis: f points from the scene toward the sun.
+    float f[3] = {sun[0], sun[1], sun[2]};
+    float up[3] = {0.f, 1.f, 0.f};
+    if (std::fabs(f[1]) > 0.99f) {
+        up[1] = 0.f;
+        up[2] = 1.f;
+    }
+    float r[3] = {up[1] * f[2] - up[2] * f[1], up[2] * f[0] - up[0] * f[2], up[0] * f[1] - up[1] * f[0]};
+    float rl = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+    r[0] /= rl;
+    r[1] /= rl;
+    r[2] /= rl;
+    float u[3] = {f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]};
+    float lo[3] = {1e30f, 1e30f, 1e30f};
+    float hi[3] = {-1e30f, -1e30f, -1e30f};
+    auto add = [&](const float p[3]) {
+        const float q[3] = {p[0] * r[0] + p[1] * r[1] + p[2] * r[2], p[0] * u[0] + p[1] * u[1] + p[2] * u[2],
+                            p[0] * f[0] + p[1] * f[1] + p[2] * f[2]};
+        for (int i = 0; i < 3; ++i) {
+            lo[i] = std::min(lo[i], q[i]);
+            hi[i] = std::max(hi[i], q[i]);
+        }
+    };
+    const float corners[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+    for (const auto& c : corners) {
+        float n[3];
+        float fpt[3];
+        unproject(c[0], c[1], 0.f, n);
+        unproject(c[0], c[1], 1.f, fpt);
+        float d[3] = {fpt[0] - n[0], fpt[1] - n[1], fpt[2] - n[2]};
+        const float dl = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        d[0] /= dl;
+        d[1] /= dl;
+        d[2] /= dl;
+        for (float h : {height_min, height_max}) {
+            float t = kReach;
+            if (d[1] < -1e-4f && n[1] > h) {
+                t = std::min(kReach, (h - n[1]) / d[1]);
+            }
+            const float p[3] = {n[0] + d[0] * t, n[1] + d[1] * t, n[2] + d[2] * t};
+            add(p);
+        }
+        add(n);
+    }
+    // Casters between the sun and the visible ground: extend toward the sun.
+    hi[2] += kReach;
+    const float sx = 2.f / (hi[0] - lo[0]);
+    const float sy = 2.f / (hi[1] - lo[1]);
+    const float sz = 1.f / (hi[2] - lo[2]);
+    // Column-major: x' = sx*(dot(p,r) - lo0) - 1, y' likewise, z' = (hi2 - dot(p,f)) * sz.
+    float m[16] = {};
+    m[0] = sx * r[0];
+    m[4] = sx * r[1];
+    m[8] = sx * r[2];
+    m[12] = -sx * lo[0] - 1.f;
+    m[1] = sy * u[0];
+    m[5] = sy * u[1];
+    m[9] = sy * u[2];
+    m[13] = -sy * lo[1] - 1.f;
+    m[2] = -sz * f[0];
+    m[6] = -sz * f[1];
+    m[10] = -sz * f[2];
+    m[14] = sz * hi[2];
+    m[15] = 1.f;
+    std::memcpy(out, m, sizeof(m));
+    return true;
+}
 
 void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, id<MTLTexture> depth,
                   const SceneBindings& scene, MTLClearColor clear) {
@@ -282,6 +460,7 @@ void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, i
     // Model draws reuse texture slots 0 and 1, so terrain binds its own maps first.
     [scene.arguments setTexture:scene.minimap.gpuResourceID atIndex:0];
     [scene.arguments setTexture:scene.metal_map.gpuResourceID atIndex:1];
+    [scene.arguments setTexture:scene.shadow_map.gpuResourceID atIndex:2];
     [scene.arguments setAddress:scene.vertices.gpuAddress atIndex:1];
     [encoder setRenderPipelineState:scene.terrain_pipeline];
     [encoder setDepthStencilState:scene.terrain_depth];
@@ -291,8 +470,7 @@ void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, i
                         indexBuffer:scene.indices.gpuAddress
                   indexBufferLength:scene.indices.length];
 
-    if (scene.model_index_count > 0 && scene.model_vertices != nil && scene.model_indices != nil &&
-        scene.model_color != nil && scene.model_other != nil && scene.model_pipeline != nil && scene.pieces != nil) {
+    if (model_drawable(scene)) {
         [scene.arguments setTexture:scene.model_color.gpuResourceID atIndex:0];
         [scene.arguments setTexture:scene.model_other.gpuResourceID atIndex:1];
         [scene.arguments setAddress:scene.model_vertices.gpuAddress atIndex:1];
@@ -1121,6 +1299,40 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
         error = ns_error(ns_error_obj, "model pipeline creation failed");
         return false;
     }
+    {
+        // Depth-only sun passes: no fragment stage, no colour attachment.
+        for (int which = 0; which < 2; ++which) {
+            MTL4LibraryFunctionDescriptor* vertex = [MTL4LibraryFunctionDescriptor new];
+            vertex.library = library;
+            vertex.name = which == 0 ? @"shadow_terrain_vs" : @"shadow_model_vs";
+            MTL4RenderPipelineDescriptor* desc = [MTL4RenderPipelineDescriptor new];
+            desc.label = vertex.name;
+            desc.vertexFunctionDescriptor = vertex;
+            desc.rasterSampleCount = 1;
+            desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+            desc.colorAttachments[0].pixelFormat = MTLPixelFormatInvalid;
+            id<MTLRenderPipelineState> state =
+                [compiler newRenderPipelineStateWithDescriptor:desc compilerTaskOptions:nil error:&ns_error_obj];
+            if (state == nil) {
+                error = ns_error(ns_error_obj, "shadow pipeline creation failed");
+                return false;
+            }
+            (which == 0 ? impl_->shadow_terrain_pipeline : impl_->shadow_model_pipeline) = state;
+        }
+        MTLTextureDescriptor* shadow_desc =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                               width:kShadowSize
+                                                              height:kShadowSize
+                                                           mipmapped:NO];
+        shadow_desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        shadow_desc.storageMode = MTLStorageModePrivate;
+        impl_->shadow_map = [impl_->device newTextureWithDescriptor:shadow_desc];
+        if (impl_->shadow_map == nil) {
+            error = "shadow map allocation failed";
+            return false;
+        }
+        [impl_->residency addAllocation:impl_->shadow_map];
+    }
     impl_->ring_pipeline = make_pipeline(compiler, library, @"terrain_vs", @"ring_fs", true, &ns_error_obj);
     if (impl_->ring_pipeline == nil) {
         error = ns_error(ns_error_obj, "metal spot ring pipeline creation failed");
@@ -1232,7 +1444,7 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
 
     MTL4ArgumentTableDescriptor* table_desc = [MTL4ArgumentTableDescriptor new];
     table_desc.maxBufferBindCount = 4;
-    table_desc.maxTextureBindCount = 2;
+    table_desc.maxTextureBindCount = 3;  // 0,1 material, 2 shadow map
     table_desc.maxSamplerStateBindCount = 1;
     table_desc.initializeBindings = YES;
     impl_->arguments = [impl_->device newArgumentTableWithDescriptor:table_desc error:&ns_error_obj];
@@ -1307,6 +1519,10 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
     std::memcpy(impl_->sun, mesh.sun, sizeof(impl_->sun));
     std::memcpy(impl_->ambient, mesh.ambient, sizeof(impl_->ambient));
     std::memcpy(impl_->diffuse, mesh.diffuse, sizeof(impl_->diffuse));
+    impl_->ground_shadow_density = mesh.ground_shadow_density;
+    impl_->unit_shadow_density = mesh.unit_shadow_density;
+    impl_->height_min = mesh.min_height;
+    impl_->height_max = mesh.max_height;
     return true;
 }
 
@@ -1474,6 +1690,11 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     uniforms.model_pose[3] = impl_->model_pose[3];
     uniforms.marker[0] = impl_->marker_radius;
     uniforms.marker[1] = impl_->bank;
+    const bool shadows = impl_->shadow_map != nil &&
+                         fit_shadow(frame.view_proj, impl_->sun, impl_->height_min, impl_->height_max, uniforms.shadow_vp);
+    uniforms.shadow[0] = impl_->ground_shadow_density;
+    uniforms.shadow[1] = impl_->unit_shadow_density;
+    uniforms.shadow[2] = shadows ? 1.f : 0.f;
     std::memcpy(slot.uniforms.contents, &uniforms, sizeof(uniforms));
     if (slot.pieces != nil && impl_->piece_cpu.size() * sizeof(float) == slot.pieces.length) {
         std::memcpy(slot.pieces.contents, impl_->piece_cpu.data(), slot.pieces.length);
@@ -1575,6 +1796,9 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     scene.model_color = impl_->model_color;
     scene.model_other = impl_->model_other;
     scene.pieces = slot.pieces;
+    scene.shadow_map = impl_->shadow_map;
+    scene.shadow_terrain_pipeline = impl_->shadow_terrain_pipeline;
+    scene.shadow_model_pipeline = impl_->shadow_model_pipeline;
     scene.index_count = impl_->index_count;
     scene.water_index_count = impl_->water_index_count;
     scene.ring_index_count = impl_->ring_index_count;
@@ -1585,6 +1809,7 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     // wait here stalls later presents behind the scanout and starves the drawable pool.
     [slot.command_buffer beginCommandBufferWithAllocator:slot.allocator];
     [slot.command_buffer useResidencySet:impl_->residency];
+    encode_shadow(slot.command_buffer, scene);
     encode_scene(slot.command_buffer, drawable.texture, impl_->depth, scene, clear);
     encode_hud((__bridge void*)slot.command_buffer, (__bridge void*)drawable.texture);
     if (shot) {
