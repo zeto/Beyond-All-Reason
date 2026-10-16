@@ -55,5 +55,7 @@ bool check_hud_text(std::string& error);
 
 // CoreText advance for Spring HUD text (color codes stripped). size is pixel height.
 float hud_measure_width(const std::string& text, const std::string& font_path, float size);
+// Font line height (ascent + descent + leading) at size px; Print steps down by this per \n.
+float hud_line_height(const std::string& font_path, float size);
 
 }  // namespace bar

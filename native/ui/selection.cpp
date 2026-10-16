@@ -530,4 +530,16 @@ bool write_selection_report(const std::string& path, int frame, std::string& err
     return true;
 }
 
+void selection_replace(const std::vector<int>& ids, bool append) {
+    if (!append) {
+        g_snap.selected.clear();
+    }
+    for (int id : ids) {
+        if (std::find(g_snap.selected.begin(), g_snap.selected.end(), id) == g_snap.selected.end()) {
+            g_snap.selected.push_back(id);
+        }
+    }
+    g_snap.active_cmd = 0;
+}
+
 }  // namespace bar

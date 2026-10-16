@@ -1645,4 +1645,15 @@ float hud_measure_width(const std::string& text, const std::string& font_path, f
 }
 
 
+float hud_line_height(const std::string& font_path, float size) {
+    const float px = size < 4.f ? 4.f : (size > 256.f ? 256.f : size);
+    CTFontRef font = hud_font(font_path, px);
+    if (font == nullptr) {
+        return size;
+    }
+    const float h = static_cast<float>(CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font));
+    CFRelease(font);
+    return h * (size / px);
+}
+
 }  // namespace bar

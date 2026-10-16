@@ -7,6 +7,7 @@
 #include "hud_status.h"
 #include "camera.h"
 #include "gadget_host.h"
+#include "unitdef.h"
 
 extern "C" {
 #include "lauxlib.h"
@@ -14,6 +15,7 @@ extern "C" {
 #include "lualib.h"
 }
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -616,6 +618,12 @@ int ui_handler_update_callin(lua_State* state) {
         } else if (callin == "Update") {
             g_order_update = true;
         }
+    } else if (g_current_widget == "bar_ui_info") {
+        if (callin == "DrawScreen") {
+            g_info_draw = true;
+        } else if (callin == "Update") {
+            g_info_update = true;
+        }
     }
     return 0;
 }
@@ -654,6 +662,12 @@ int ui_handler_remove_callin(lua_State* state) {
         } else if (callin == "Update") {
             g_order_update = false;
         }
+    } else if (g_current_widget == "bar_ui_info") {
+        if (callin == "DrawScreen") {
+            g_info_draw = false;
+        } else if (callin == "Update") {
+            g_info_update = false;
+        }
     }
     return 0;
 }
@@ -667,6 +681,78 @@ int ui_get_game_frame(lua_State* state) {
 int ui_get_game_seconds(lua_State* state) {
     lua_pushnumber(state, static_cast<double>(g_frame) / 30.0);
     return 1;
+}
+
+int sim_def_id_of(int unit_id) {
+    if (g_sim == nullptr) return 0;
+    for (size_t i = 0; i < g_sim->id.size(); ++i) {
+        if (g_sim->id[i] == unit_id) return player_unitdef_id(g_sim->def_name[i]);
+    }
+    return 0;
+}
+
+int ui_get_selected_units_counts(lua_State* state) {
+    const SelectionSnapshot& snap = selection_snapshot();
+    lua_newtable(state);
+    int n = 0;
+    for (int unit_id : snap.selected) {
+        const int def_id = sim_def_id_of(unit_id);
+        if (def_id == 0) continue;
+        lua_rawgeti(state, -1, def_id);
+        const int have = lua_isnumber(state, -1) ? static_cast<int>(lua_tointeger(state, -1)) : 0;
+        lua_pop(state, 1);
+        if (have == 0) ++n;
+        lua_pushinteger(state, have + 1);
+        lua_rawseti(state, -2, def_id);
+    }
+    lua_pushinteger(state, n);
+    lua_setfield(state, -2, "n");
+    return 1;
+}
+
+int ui_get_units_in_sphere(lua_State* state) {
+    const double x = luaL_checknumber(state, 1);
+    const double y = luaL_checknumber(state, 2);
+    const double z = luaL_checknumber(state, 3);
+    const double r = luaL_checknumber(state, 4);
+    lua_newtable(state);
+    if (g_sim == nullptr) return 1;
+    int n = 0;
+    for (size_t i = 0; i < g_sim->id.size(); ++i) {
+        const double dx = g_sim->x[i] - x, dy = g_sim->y[i] - y, dz = g_sim->z[i] - z;
+        if (dx * dx + dy * dy + dz * dz <= r * r) {
+            lua_pushinteger(state, g_sim->id[i]);
+            lua_rawseti(state, -2, ++n);
+        }
+    }
+    return 1;
+}
+
+int ui_select_unit_array(lua_State* state) {
+    std::vector<int> ids;
+    if (lua_istable(state, 1)) {
+        const int n = static_cast<int>(lua_objlen(state, 1));
+        for (int k = 1; k <= n; ++k) {
+            lua_rawgeti(state, 1, k);
+            if (lua_isnumber(state, -1)) ids.push_back(static_cast<int>(lua_tointeger(state, -1)));
+            lua_pop(state, 1);
+        }
+    }
+    selection_replace(ids, lua_toboolean(state, 2) != 0);
+    return 0;
+}
+
+int ui_select_unit_map(lua_State* state) {
+    std::vector<int> ids;
+    if (lua_istable(state, 1)) {
+        lua_pushnil(state);
+        while (lua_next(state, 1) != 0) {
+            if (lua_isnumber(state, -2)) ids.push_back(static_cast<int>(lua_tointeger(state, -2)));
+            lua_pop(state, 1);
+        }
+    }
+    selection_replace(ids, lua_toboolean(state, 2) != 0);
+    return 0;
 }
 
 int ui_get_selected_units_sorted(lua_State* state) {
@@ -974,6 +1060,173 @@ int ui_get_cmd_desc_index(lua_State* state) {
 }
 
 
+
+int ui_get_mod_options(lua_State* state) {
+    // Same defaults as gadget_host spring_get_mod_options (modoptions.lua file defs).
+    // gui_top_bar checkTidalRelevant requires debugcommands to be a string.
+    lua_newtable(state);
+    lua_pushstring(state, "");
+    lua_setfield(state, -2, "debugcommands");
+    lua_pushnumber(state, 0);
+    lua_setfield(state, -2, "map_waterlevel");
+    lua_pushnumber(state, 1000);
+    lua_setfield(state, -2, "startmetal");
+    lua_pushnumber(state, 1000);
+    lua_setfield(state, -2, "startenergy");
+    lua_pushnumber(state, 1000);
+    lua_setfield(state, -2, "startmetalstorage");
+    lua_pushnumber(state, 1000);
+    lua_setfield(state, -2, "startenergystorage");
+    lua_pushboolean(state, 0);
+    lua_setfield(state, -2, "proposed_unit_reworks");
+    lua_pushstring(state, "normal");
+    lua_setfield(state, -2, "scav_difficulty");
+    lua_pushstring(state, "normal");
+    lua_setfield(state, -2, "raptor_difficulty");
+    return 1;
+}
+
+int ui_get_team_color(lua_State* state) {
+    // Armada red from startscript team color.
+    (void)state;
+    lua_pushnumber(state, 0.90);
+    lua_pushnumber(state, 0.15);
+    lua_pushnumber(state, 0.12);
+    return 3;
+}
+
+int ui_get_team_info(lua_State* state) {
+    lua_pushstring(state, "Player");
+    lua_pushinteger(state, 0);  // leader
+    lua_pushboolean(state, 0);  // dead
+    lua_pushboolean(state, 0);  // isAI
+    lua_pushstring(state, "Armada");
+    lua_pushinteger(state, 0);  // allyTeam
+    return 6;
+}
+
+int ui_get_current_tooltip(lua_State* state) {
+    lua_pushstring(state, hud_status_tooltip().c_str());
+    return 1;
+}
+
+int ui_get_unit_position(lua_State* state) {
+    const int unit = static_cast<int>(luaL_checknumber(state, 1));
+    if (g_sim == nullptr) return 0;
+    for (size_t i = 0; i < g_sim->id.size(); ++i) {
+        if (g_sim->id[i] == unit) {
+            lua_pushnumber(state, g_sim->x[i]);
+            lua_pushnumber(state, g_sim->y[i]);
+            lua_pushnumber(state, g_sim->z[i]);
+            return 3;
+        }
+    }
+    return 0;
+}
+
+int ui_get_unit_radius(lua_State* state) {
+    (void)state;
+    lua_pushnumber(state, 20);
+    return 1;
+}
+
+int ui_get_unit_height(lua_State* state) {
+    (void)state;
+    lua_pushnumber(state, 40);
+    return 1;
+}
+
+int ui_get_unit_experience(lua_State* state) {
+    lua_pushnumber(state, 0);
+    return 1;
+}
+
+int ui_get_unit_resources(lua_State* state) {
+    // metalMake, metalUse, energyMake, energyUse — commander income from top bar state is elsewhere;
+    // report zeros when unknown.
+    lua_pushnumber(state, 0);
+    lua_pushnumber(state, 0);
+    lua_pushnumber(state, 0);
+    lua_pushnumber(state, 0);
+    return 4;
+}
+
+int ui_get_unit_team(lua_State* state) {
+    const int unit = static_cast<int>(luaL_checknumber(state, 1));
+    if (g_sim == nullptr) return 0;
+    for (size_t i = 0; i < g_sim->id.size(); ++i) {
+        if (g_sim->id[i] == unit) {
+            lua_pushinteger(state, g_sim->team[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int ui_get_player_info(lua_State* state) {
+    lua_pushstring(state, "Player");
+    lua_pushboolean(state, 1);  // active
+    lua_pushinteger(state, 0);  // spectator
+    lua_pushinteger(state, 0);  // team
+    lua_pushinteger(state, 0);  // allyTeam
+    lua_pushnumber(state, 0);   // ping
+    lua_pushnumber(state, 0);   // cpu
+    lua_pushstring(state, "");  // country
+    lua_pushinteger(state, 0);  // rank
+    return 9;
+}
+
+int ui_get_ai_info(lua_State* state) {
+    return 0;
+}
+
+int ui_get_all_features(lua_State* state) {
+    lua_newtable(state);
+    return 1;
+}
+
+int ui_get_features_in_sphere(lua_State* state) {
+    lua_newtable(state);
+    return 1;
+}
+
+int ui_get_feature_def_id(lua_State* state) {
+    return 0;
+}
+
+int ui_get_feature_resources(lua_State* state) {
+    return 0;
+}
+
+int ui_get_ground_info(lua_State* state) {
+    lua_pushstring(state, "Grass");
+    lua_pushnumber(state, 0);
+    lua_pushnumber(state, 0);
+    lua_pushnumber(state, 0);
+    lua_pushnumber(state, 0);
+    lua_pushnumber(state, 0);
+    return 6;
+}
+
+int ui_get_game_rules_param(lua_State* state) {
+    return 0;
+}
+
+int ui_get_unit_mass(lua_State* state) {
+    lua_pushnumber(state, 5000);
+    return 1;
+}
+
+int ui_get_unit_is_transporting(lua_State* state) {
+    lua_newtable(state);
+    return 1;
+}
+
+int ui_get_team_units_sorted(lua_State* state) {
+    lua_newtable(state);
+    return 1;
+}
+
 int ui_get_key_bindings(lua_State* state) {
     // No keybindings archive hosted yet — empty list is the real state.
     lua_newtable(state);
@@ -1225,6 +1478,47 @@ int gl_config_minimap(lua_State* state) {
     return 0;
 }
 
+// Fill UnitDefNames[name] with unit-file values for every def the live sim carries.
+// Same loaders the sim uses; nothing is invented. Fields Spring exposes on UnitDef.
+void fill_live_def_stats(lua_State* state, const std::string& game_root) {
+    if (g_sim == nullptr) return;
+    std::vector<std::string> seen;
+    for (const std::string& name : g_sim->def_name) {
+        if (name.empty() || std::find(seen.begin(), seen.end(), name) != seen.end()) continue;
+        seen.push_back(name);
+        lua_getglobal(state, "UnitDefNames");
+        lua_getfield(state, -1, name.c_str());
+        if (!lua_istable(state, -1)) { lua_pop(state, 2); continue; }
+        std::string err;
+        UnitSensors sensors;
+        if (load_unit_sensors(game_root, name, sensors, err)) {
+            lua_pushnumber(state, sensors.sight); lua_setfield(state, -2, "sightDistance");
+            lua_pushnumber(state, sensors.air); lua_setfield(state, -2, "airSightDistance");
+            lua_pushnumber(state, sensors.radar); lua_setfield(state, -2, "radarDistance");
+            lua_pushnumber(state, sensors.sonar); lua_setfield(state, -2, "sonarDistance");
+        }
+        UnitMotion motion;
+        if (load_unit_motion(game_root, name, motion, err)) {
+            lua_pushnumber(state, motion.speed_per_sec); lua_setfield(state, -2, "speed");
+        }
+        float range = 0.f;
+        if (load_unit_max_weapon_range(game_root, name, range, err)) {
+            lua_pushnumber(state, range); lua_setfield(state, -2, "maxWeaponRange");
+        }
+        float health = 0.f;
+        if (load_unit_health(game_root, name, health, err)) {
+            lua_pushnumber(state, health); lua_setfield(state, -2, "health");
+        }
+        UnitBuild build;
+        if (load_unit_build(game_root, name, build, err)) {
+            lua_pushnumber(state, build.build_time); lua_setfield(state, -2, "buildTime");
+            lua_pushnumber(state, build.metal_cost); lua_setfield(state, -2, "metalCost");
+            lua_pushnumber(state, build.energy_cost); lua_setfield(state, -2, "energyCost");
+        }
+        lua_pop(state, 2);
+    }
+}
+
 bool install_widget_handler(lua_State* state, std::string& error) {
     lua_newtable(state);
     lua_pushcfunction(state, ui_handler_update_callin);
@@ -1429,6 +1723,14 @@ os.clock = os.clock or function() return 0 end
     set_spring(state, "GetSelectedUnitsSorted", ui_get_selected_units_sorted);
     set_spring(state, "GetUnitCmdDescs", ui_get_unit_cmd_descs);
     set_spring(state, "GetActiveCmdDescs", ui_get_active_cmd_descs);
+    set_spring(state, "GetSelectedUnitsCounts", ui_get_selected_units_counts);
+    set_spring(state, "GetUnitsInSphere", ui_get_units_in_sphere);
+    set_spring(state, "SelectUnitArray", ui_select_unit_array);
+    set_spring(state, "SelectUnitMap", ui_select_unit_map);
+    // bar-metal draws no engine selection-info text; the toggle has nothing to switch.
+    set_spring(state, "SetDrawSelectionInfo", ui_noop);
+    // bar-metal UnitSim carries no per-weapon state; Spring returns nil for an unknown weapon.
+    set_spring(state, "GetUnitWeaponState", ui_noop);
     set_spring(state, "FindUnitCmdDesc", ui_find_unit_cmd_desc);
     set_spring(state, "ValidUnitID", ui_valid_unit_id);
     set_spring(state, "GetUnitCommands", ui_get_unit_commands);
@@ -1443,6 +1745,27 @@ os.clock = os.clock or function() return 0 end
     set_spring(state, "GetCmdDescIndex", ui_get_cmd_desc_index);
     set_spring(state, "GetActionHotKeys", ui_get_action_hotkeys);
     set_spring(state, "GetKeyBindings", ui_get_key_bindings);
+    set_spring(state, "GetModOptions", ui_get_mod_options);
+    set_spring(state, "GetTeamColor", ui_get_team_color);
+    set_spring(state, "GetTeamInfo", ui_get_team_info);
+    set_spring(state, "GetCurrentTooltip", ui_get_current_tooltip);
+    set_spring(state, "GetUnitPosition", ui_get_unit_position);
+    set_spring(state, "GetUnitRadius", ui_get_unit_radius);
+    set_spring(state, "GetUnitHeight", ui_get_unit_height);
+    set_spring(state, "GetUnitExperience", ui_get_unit_experience);
+    set_spring(state, "GetUnitResources", ui_get_unit_resources);
+    set_spring(state, "GetUnitTeam", ui_get_unit_team);
+    set_spring(state, "GetPlayerInfo", ui_get_player_info);
+    set_spring(state, "GetAIInfo", ui_get_ai_info);
+    set_spring(state, "GetAllFeatures", ui_get_all_features);
+    set_spring(state, "GetFeaturesInSphere", ui_get_features_in_sphere);
+    set_spring(state, "GetFeatureDefID", ui_get_feature_def_id);
+    set_spring(state, "GetFeatureResources", ui_get_feature_resources);
+    set_spring(state, "GetGroundInfo", ui_get_ground_info);
+    set_spring(state, "GetGameRulesParam", ui_get_game_rules_param);
+    set_spring(state, "GetUnitMass", ui_get_unit_mass);
+    set_spring(state, "GetUnitIsTransporting", ui_get_unit_is_transporting);
+    set_spring(state, "GetTeamUnitsSorted", ui_get_team_units_sorted);
     set_spring(state, "PlaySoundFile", ui_play_sound);
     set_spring(state, "GiveOrderToUnit", ui_give_order);
     set_spring(state, "Echo", ui_echo);
@@ -1483,6 +1806,26 @@ Game.textColorCodes = Game.textColorCodes or {
   ColorAndOutline = string.char(254),
   Reset = string.char(8),
 }
+-- Recoil DamageArrayHandler: "default" at 0, then ArmorDefs keys sorted (GetKeys).
+-- Bidirectional map name<->index. Categories from gamedata/armordefs.lua (pre-customparams).
+-- bar-metal sim spawns no features (GetAllFeatures is empty), so no FeatureDefs are loaded.
+FeatureDefs = FeatureDefs or {}
+FeatureDefNames = FeatureDefNames or {}
+if Game.armorTypes == nil then
+  local names = {
+    "default",
+    "commanders", "crawlingbombs", "hvyboats", "indestructable",
+    "lboats", "mines", "nanos", "raptor", "raptorqueen",
+    "scavboss", "shields", "standard", "subs", "vtol",
+  }
+  local t = {}
+  for i, name in ipairs(names) do
+    local idx = i - 1
+    t[idx] = name
+    t[name] = idx
+  end
+  Game.armorTypes = t
+end
 os = os or {}
 os.date = os.date or function() return "19700101_000000" end
 local sf = VFS.Include("common/springFunctions.lua")
@@ -1504,18 +1847,34 @@ VFS.Include("common/tablefunctions.lua")
     if (!run_chunk(state, R"LUA(
 for id, ud in pairs(UnitDefs) do
   if type(ud) == "table" then
-    if ud.maxWeaponRange == nil then ud.maxWeaponRange = 0 end
-    if ud.metalCost == nil then ud.metalCost = 0 end
-    if ud.energyCost == nil then ud.energyCost = 0 end
-    if ud.buildTime == nil then ud.buildTime = 0 end
-    if ud.buildSpeed == nil then ud.buildSpeed = 0 end
+    -- Spring defaults for missing UnitDef fields (gui_info compares with > / ==).
+    local num = {
+      "maxWeaponRange", "metalCost", "energyCost", "buildTime", "buildSpeed",
+      "minWaterDepth", "maxThisUnit", "speed", "rSpeed", "health",
+      "sightDistance", "airSightDistance", "radarDistance", "sonarDistance",
+      "radarDistanceJam", "sonarDistanceJam", "seismicDistance",
+      "energyStorage", "metalStorage", "extractsMetal", "armorType",
+      "cloakCost", "cloakCostMoving", "transportMass", "transportSize",
+      "transportCapacity", "buildDistance",
+    }
+    for _, k in ipairs(num) do
+      if ud[k] == nil then ud[k] = 0 end
+    end
+    local bools = {
+      "isBuilder", "isFactory", "isAirUnit", "isTransport", "stealth",
+      "canCloak", "canStockpile", "needGeo", "canAssist", "canReclaim",
+      "canRepair", "canRestore", "canResurrect", "canCapture",
+    }
+    for _, k in ipairs(bools) do
+      if ud[k] == nil then ud[k] = false end
+    end
     if ud.buildOptions == nil then ud.buildOptions = {} end
+    if ud.weapons == nil then ud.weapons = {} end
+    if ud.modCategories == nil then ud.modCategories = {} end
+    if ud.customParams == nil then ud.customParams = {} end
     if ud.translatedHumanName == nil then ud.translatedHumanName = ud.name or tostring(id) end
     if ud.translatedTooltip == nil then ud.translatedTooltip = ud.translatedHumanName end
     if ud.iconType == nil then ud.iconType = "default" end
-    if ud.customParams == nil then ud.customParams = {} end
-    if ud.isBuilder == nil then ud.isBuilder = false end
-    if ud.isFactory == nil then ud.isFactory = false end
   end
 end
 )LUA",
@@ -1535,6 +1894,7 @@ end
     const std::string cursor_path = env.game_root + "/luaui/Widgets/gui_cursor.lua";
     const std::string screen_path = env.game_root + "/luaui/Widgets/gui_screen_mode_info.lua";
     const std::string order_path = env.game_root + "/luaui/Widgets/gui_ordermenu.lua";
+    const std::string info_path = env.game_root + "/luaui/Widgets/gui_info.lua";
     build_cmd_set_root(env.game_root);
     hud_status_set_root(env.game_root);
     hud_status_reset();
@@ -1549,7 +1909,8 @@ end
         !load_widget(state, volume_path, "bar_ui_volume", error) ||
         !load_widget(state, cursor_path, "bar_ui_cursor", error) ||
         !load_widget(state, screen_path, "bar_ui_screenmode", error) ||
-        !load_widget(state, order_path, "bar_ui_order", error)) {
+        !load_widget(state, order_path, "bar_ui_order", error) ||
+        !load_widget(state, info_path, "bar_ui_info", error)) {
         return false;
     }
     if (!call_registry(state, "bar_ui_font", "Initialize", nullptr, 0, true, error) ||
@@ -1602,6 +1963,44 @@ end
     g_order_draw = true;
     g_order_update = true;
     if (!call_registry(state, "bar_ui_order", "Initialize", nullptr, 0, true, error)) {
+        return false;
+    }
+    g_current_widget = "bar_ui_info";
+    g_info_draw = true;
+    g_info_update = true;
+    // Re-pad UnitDefs: earlier widgets may have created stubs via UnitDefNames __index.
+    if (!run_chunk(state, R"LUA(
+for id, ud in pairs(UnitDefs) do
+  if type(ud) == "table" then
+    local num = {
+      "maxWeaponRange","metalCost","energyCost","buildTime","buildSpeed",
+      "minWaterDepth","maxThisUnit","speed","rSpeed","health",
+      "sightDistance","airSightDistance","radarDistance","sonarDistance",
+      "radarDistanceJam","sonarDistanceJam","seismicDistance",
+      "energyStorage","metalStorage","extractsMetal","armorType",
+      "cloakCost","cloakCostMoving","transportMass","transportSize",
+      "transportCapacity","buildDistance",
+    }
+    for _, k in ipairs(num) do if ud[k] == nil then ud[k] = 0 end end
+    local bools = {
+      "isBuilder","isFactory","isAirUnit","isTransport","stealth",
+      "canCloak","canStockpile","needGeo","canAssist","canReclaim",
+      "canRepair","canRestore","canResurrect","canCapture",
+    }
+    for _, k in ipairs(bools) do if ud[k] == nil then ud[k] = false end end
+    if ud.buildOptions == nil then ud.buildOptions = {} end
+    if ud.weapons == nil then ud.weapons = {} end
+    if ud.modCategories == nil then ud.modCategories = {} end
+    if ud.customParams == nil then ud.customParams = {} end
+  end
+end
+-- luaui/setupdefs.lua runs this before any widget loads.
+VFS.Include("luaui/i18nhelpers.lua").RefreshDefs()
+)LUA",
+                            error)) {
+        return false;
+    }
+    if (!call_registry(state, "bar_ui_info", "Initialize", nullptr, 0, true, error)) {
         return false;
     }
     g_current_widget.clear();
@@ -1664,6 +2063,9 @@ bool widgets_frame(int frame, std::string& error) {
         error.clear();
         g_current_widget = "bar_ui_order";
         call_registry(state, "bar_ui_order", "ViewResize", nullptr, 0, false, error);
+        error.clear();
+        g_current_widget = "bar_ui_info";
+        call_registry(state, "bar_ui_info", "ViewResize", nullptr, 0, false, error);
         error.clear();
         g_current_widget.clear();
         g_applied_w = g_next_w;
@@ -1740,6 +2142,17 @@ bool widgets_frame(int frame, std::string& error) {
                 std::cout << "ordermenu DrawScreen: " << error << "\n";
                 error.clear();
             }
+        }
+    }
+    g_current_widget = "bar_ui_info";
+    if (g_info_update) {
+        call_registry(state, "bar_ui_info", "Update", &step, 1, false, error);
+        error.clear();
+    }
+    if (g_info_draw && !selection_snapshot().selected.empty()) {
+        if (!call_registry(state, "bar_ui_info", "DrawScreen", nullptr, 0, false, error)) {
+            std::cout << "info DrawScreen: " << error << "\n";
+            error.clear();
         }
     }
     // Drive stock WG.tooltip BEFORE DrawScreen. ShowTooltip must run every frame
@@ -1878,6 +2291,17 @@ bool widgets_selection_changed(const std::vector<int>& unit_ids, std::string& er
 void widgets_set_sim(UnitSim* sim, const TerrainMesh* terrain) {
     g_sim = sim;
     g_terrain = terrain;
+    if (g_loaded && g_state != nullptr && sim != nullptr) {
+        // Unit-file stats for the live defs, then the stock def-refresh callin
+        // (gui_info LanguageChanged reruns refreshUnitInfo).
+        fill_live_def_stats(g_state, g_env.game_root);
+        std::string error;
+        g_current_widget = "bar_ui_info";
+        if (!call_registry(g_state, "bar_ui_info", "LanguageChanged", nullptr, 0, false, error)) {
+            std::cout << "info LanguageChanged: " << error << "\n";
+        }
+        g_current_widget.clear();
+    }
 }
 
 void widgets_set_view_proj(const float* view_proj16) {

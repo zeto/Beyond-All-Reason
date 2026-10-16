@@ -986,6 +986,50 @@ int font_width(lua_State* state) {
     return 1;
 }
 
+// Recoil LuaFont:WrapText(text, maxWidth[, maxHeight[, size]]) -> wrapped, lines.
+// Greedy word wrap at `size` (default font px) using the same CoreText advance as Print.
+int font_wrap(lua_State* state) {
+    size_t length = 0;
+    const char* raw = luaL_checklstring(state, 2, &length);
+    const float max_width = static_cast<float>(luaL_checknumber(state, 3));
+    const float px = field_num(state, 1, "px", 16);
+    const float size = lua_isnumber(state, 5) ? static_cast<float>(lua_tonumber(state, 5)) : px;
+    const std::string path = font_file(state, 1);
+    const std::string text(raw, length);
+    auto width = [&](const std::string& s) { return hud_measure_width(s, path, size); };
+    std::string out;
+    int lines = 0;
+    size_t start = 0;
+    while (start <= text.size()) {
+        size_t nl = text.find('\n', start);
+        const std::string para = text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+        std::string line;
+        size_t i = 0;
+        while (i <= para.size()) {
+            size_t sp = para.find(' ', i);
+            const std::string word = para.substr(i, sp == std::string::npos ? std::string::npos : sp - i);
+            const std::string cand = line.empty() ? word : line + " " + word;
+            if (!line.empty() && width(cand) > max_width) {
+                out += line + "\n";
+                ++lines;
+                line = word;
+            } else {
+                line = cand;
+            }
+            if (sp == std::string::npos) break;
+            i = sp + 1;
+        }
+        out += line;
+        ++lines;
+        if (nl == std::string::npos) break;
+        out += "\n";
+        start = nl + 1;
+    }
+    lua_pushlstring(state, out.data(), out.size());
+    lua_pushinteger(state, lines);
+    return 2;
+}
+
 int font_height(lua_State* state) {
     (void)state;
     // Approximate em-height as a fraction of the font's pixel size.
@@ -1014,8 +1058,42 @@ int font_print(lua_State* state) {
     if (plain.empty()) {
         return 0;
     }
+    const std::string full = raw != nullptr ? std::string(raw, length) : std::string();
+    if (full.find('\n') != std::string::npos) {
+        // Recoil Print lays out each \n line one line-height lower; color codes carry over.
+        const float size = lua_num(state, 5, field_num(state, 1, "px", 16));
+        const float step = hud_line_height(font_file(state, 1), size);
+        const float x0 = lua_num(state, 3, 0);
+        float y = lua_num(state, 4, 0);
+        const char* options = lua_tostring(state, 6);
+        std::string carry;
+        size_t start = 0;
+        while (start <= full.size()) {
+            const size_t nl = full.find('\n', start);
+            const std::string piece = full.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+            lua_pushvalue(state, 1);
+            const std::string line = carry + piece;
+            lua_pushlstring(state, line.data(), line.size());
+            lua_pushnumber(state, x0);
+            lua_pushnumber(state, y);
+            lua_pushnumber(state, size);
+            if (options != nullptr) lua_pushstring(state, options); else lua_pushnil(state);
+            lua_pushcfunction(state, font_print);
+            lua_insert(state, -7);
+            lua_call(state, 6, 0);
+            for (size_t i = 0; i < piece.size(); ++i) {
+                const unsigned char c = static_cast<unsigned char>(piece[i]);
+                if (c == 255 && i + 3 < piece.size()) { carry = piece.substr(i, 4); i += 3; }
+                else if (c == 8) { carry.clear(); }
+            }
+            y -= step;
+            if (nl == std::string::npos) break;
+            start = nl + 1;
+        }
+        return 0;
+    }
     HudText text;
-    text.text = raw != nullptr ? std::string(raw, length) : std::string();
+    text.text = full;
     text.x = lua_num(state, 3, 0);
     text.y = lua_num(state, 4, 0);
     text.size = lua_num(state, 5, field_num(state, 1, "px", 16));
@@ -1096,6 +1174,8 @@ void gl_install(lua_State* state) {
     lua_setfield(state, -2, "GetTextWidth");
     lua_pushcfunction(state, font_height);
     lua_setfield(state, -2, "GetTextHeight");
+    lua_pushcfunction(state, font_wrap);
+    lua_setfield(state, -2, "WrapText");
     lua_setfield(state, -2, "__index");
     lua_pop(state, 1);
 

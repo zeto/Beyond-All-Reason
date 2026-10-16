@@ -64,6 +64,9 @@ struct SelectEvent {
 
 void selection_reset();
 
+// Replace the selection (Spring.SelectUnitArray / SelectUnitMap). append keeps current ids.
+void selection_replace(const std::vector<int>& ids, bool append);
+
 void selection_set_view(int width, int height);
 
 void selection_set_mouse(float x, float y, bool left, bool middle, bool right, bool alt, bool ctrl, bool meta,
