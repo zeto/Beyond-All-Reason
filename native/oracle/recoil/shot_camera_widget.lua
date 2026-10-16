@@ -27,7 +27,19 @@ local SPRING_RX = math.pi - TILT
 -- from focus (dir forward); eye = focus - dir*dist → eye is behind forward = +Z if
 -- forward is -Z. So ry=0 matches south eye when forward is north.
 local SPRING_RY = 0
-local dumped = false
+local last_logged = -1
+
+-- Camera checks go to <write-dir>/oracle_cam.log, not the console, so the log
+-- text never lands in the reference screenshot.
+local function camlog(s)
+	local fh = io and io.open and io.open("oracle_cam.log", "a")
+	if fh then
+		fh:write(s, "\n")
+		fh:close()
+	else
+		Spring.Log("oracle_shot", LOG.INFO, s)
+	end
+end
 
 local function commander()
 	for _, id in ipairs(Spring.GetTeamUnits(0) or {}) do
@@ -67,34 +79,44 @@ local function lock()
 	local dist = math.sqrt(horiz * horiz + vy * vy)
 	local rx = math.pi - math.atan2(horiz, vy)
 	p.rx = rx
+	-- Spring cam pins its focus to the ground (py came back 57.7, not ty), so the eye
+	-- drifts by the 30-elmo target offset. The FPS controller takes the eye position
+	-- and rotation directly, so it can hold camera.cpp's eye and look-at exactly.
+	local len = dist
+	local fx, fy, fz = -vx / len, -vy / len, -vz / len
 	Spring.SetCameraState({
-		name = "spring",
-		mode = 2,
-		px = p.tx,
-		py = p.ty,
-		pz = p.tz,
-		dist = dist,
+		name = "fps",
+		mode = 0,
+		px = p.ex,
+		py = p.ey,
+		pz = p.ez,
+		dx = fx,
+		dy = fy,
+		dz = fz,
 		rx = rx,
 		ry = SPRING_RY,
 		rz = 0,
+		oldHeight = p.ey,
 		fov = 45,
 	}, 0)
+	p.fx, p.fy, p.fz = fx, fy, fz
 
 	pcall(Spring.SelectUnitArray, {id})
 
-	if not dumped and (Spring.GetGameFrame() or 0) > 40 then
+	local f = Spring.GetGameFrame() or 0
+	if last_logged < 0 and f >= 20 then
+		last_logged = f
 		local cx, cy, cz = Spring.GetCameraPosition()
-		local dx, dy, dz = Spring.GetCameraDirection()
-		local err = 1e9
-		if cx then
-			err = math.sqrt((cx - p.ex) ^ 2 + (cy - p.ey) ^ 2 + (cz - p.ez) ^ 2)
-		end
-		Spring.Log("oracle_shot", "info", string.format(
-			"oracle_cam err=%.1f want=%.0f,%.0f,%.0f got=%.0f,%.0f,%.0f dir=%.2f,%.2f,%.2f rx=%.3f ry=%.3f",
-			err, p.ex, p.ey, p.ez, cx or -1, cy or -1, cz or -1,
-			dx or 0, dy or 0, dz or 0, p.rx, SPRING_RY
-		))
-		dumped = true
+		local st = Spring.GetCameraState() or {}
+		local gx, gy, gz = Spring.GetCameraDirection()
+		local err = cx and math.sqrt((cx - p.ex) ^ 2 + (cy - p.ey) ^ 2 + (cz - p.ez) ^ 2) or 1e9
+		camlog(string.format(
+			"oracle_cam f=%d err=%.2f want=%.1f,%.1f,%.1f got=%.1f,%.1f,%.1f req dist=%.1f rx=%.4f | state mode=%s name=%s dist=%.1f rx=%.4f ry=%.4f p=%.1f,%.1f,%.1f",
+			f, err, p.ex, p.ey, p.ez, cx or -1, cy or -1, cz or -1, dist, rx,
+			tostring(st.mode), tostring(st.name), st.dist or -1, st.rx or -1, st.ry or -1,
+			st.px or -1, st.py or -1, st.pz or -1))
+		camlog(string.format("oracle_cam_dir f=%d want=%.4f,%.4f,%.4f got=%.4f,%.4f,%.4f",
+			f, p.fx, p.fy, p.fz, gx or 0, gy or 0, gz or 0))
 	end
 end
 
@@ -109,7 +131,7 @@ function widget:Initialize()
 			pcall(widgetHandler.DisableWidget, widgetHandler, n)
 		end
 	end
-	Spring.Log("oracle_shot", "info", string.format("oracle_cam_widget: spring rx=%.3f ry=%.3f dist=%.0f", SPRING_RX, SPRING_RY, DIST))
+	camlog(string.format("oracle_cam_widget: spring rx=%.3f ry=%.3f dist=%.0f", SPRING_RX, SPRING_RY, DIST))
 end
 
 function widget:Update()

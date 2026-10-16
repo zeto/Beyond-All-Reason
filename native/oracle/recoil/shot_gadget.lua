@@ -90,7 +90,7 @@ else
 		local vsx, vsy = Spring.GetViewGeometry()
 		local got = Spring.GetCameraState()
 		if got then
-			Spring.Log("oracle_shot", "info", string.format(
+			Spring.Echo(string.format(
 				"oracle_shot: gotcam px=%.1f py=%.1f pz=%.1f dx=%.3f dy=%.3f dz=%.3f mode=%s %dx%d",
 				got.px or 0, got.py or 0, got.pz or 0, got.dx or 0, got.dy or 0, got.dz or 0,
 				tostring(got.mode), vsx or 0, vsy or 0

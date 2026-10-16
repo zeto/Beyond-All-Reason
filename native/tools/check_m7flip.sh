@@ -101,11 +101,12 @@ capture_ref() {
   return 0
 }
 
-capture_ref select  --frames 100 --shotframe 60 || true
-capture_ref build   --frames 110 --shotframe 70 --builddef armmex || true
-capture_ref minimap --frames 100 --shotframe 60 || true
-capture_ref hud     --frames 110 --shotframe 70 --damage 0.5 || true
-capture_ref widgets --frames 100 --shotframe 60 || true
+# BAR's start-spawn effect hides the commander until ~frame 150; shoot after it.
+capture_ref select  --frames 260 --shotframe 200 || true
+capture_ref build   --frames 270 --shotframe 210 --builddef armmex || true
+capture_ref minimap --frames 260 --shotframe 200 || true
+capture_ref hud     --frames 270 --shotframe 210 --damage 0.5 || true
+capture_ref widgets --frames 260 --shotframe 200 || true
 
 # --- FLIP score ---
 "$FLIP_PY" - "$OUT" "$BAR_FLIP" "$BOOKMARKS" <<'PY'
