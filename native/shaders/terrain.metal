@@ -176,5 +176,8 @@ fragment float4 hud_color_fs(HudOut in [[stage_in]]) {
 }
 
 fragment float4 hud_text_fs(HudOut in [[stage_in]], texture2d<float> atlas [[texture(0)]], sampler samp [[sampler(0)]]) {
-    return atlas.sample(samp, in.uv);
+    // Nearest keeps small outlined income glyphs crisp; linear turned them into color blobs.
+    constexpr sampler nearest_samp(coord::normalized, address::clamp_to_edge, filter::nearest);
+    (void)samp;
+    return atlas.sample(nearest_samp, in.uv);
 }

@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "gl/gl_api.h"
 #include "terrain_renderer.h"
 
@@ -976,9 +977,12 @@ int font_width(lua_State* state) {
     const float px = field_num(state, 1, "px", 16);
     const std::string path = font_file(state, 1);
     const std::string payload = raw != nullptr ? std::string(raw, length) : std::string();
-    // CoreText advance; Spring color codes are stripped inside hud_line.
+    // CoreText advance in pixels at this font's px; Spring GetTextWidth is size-relative
+    // (callers multiply by fontsize). Returning absolute px made scissor widths ~fontsize
+    // too large and erased wind/com text from the top-bar R2T atlas.
     const float advance = hud_measure_width(payload, path, px);
-    lua_pushnumber(state, static_cast<double>(advance));
+    const float relative = (px > 0.f) ? (advance / px) : 0.f;
+    lua_pushnumber(state, static_cast<double>(relative));
     return 1;
 }
 

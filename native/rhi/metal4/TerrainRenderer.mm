@@ -410,7 +410,8 @@ CFStringRef cfstring_lossy(const std::string& text) {
 
 // Spring \255RGB applies a mid-string color; \008 resets to the Print base color.
 // Strip codes into plain UTF-8, record (start,len,rgba) runs, then one attributed string.
-CTLineRef hud_line(CTFontRef font, const std::string& text, float r, float g, float b, float a) {
+CTLineRef hud_line(CTFontRef font, const std::string& text, float r, float g, float b, float a,
+                 bool apply_color_codes = true) {
     struct ColorRun {
         CFIndex start = 0;
         CFIndex len = 0;
@@ -443,7 +444,7 @@ CTLineRef hud_line(CTFontRef font, const std::string& text, float r, float g, fl
     };
     for (size_t i = 0; i < text.size();) {
         const unsigned char c = static_cast<unsigned char>(text[i]);
-        if (c == 255 && i + 3 < text.size()) {
+        if (apply_color_codes && c == 255 && i + 3 < text.size()) {
             close_run();
             cr = static_cast<unsigned char>(text[i + 1]) / 255.f;
             cg = static_cast<unsigned char>(text[i + 2]) / 255.f;
@@ -452,12 +453,21 @@ CTLineRef hud_line(CTFontRef font, const std::string& text, float r, float g, fl
             i += 4;
             continue;
         }
-        if (c == 8) {
+        if (apply_color_codes && c == 8) {
             close_run();
             cr = r;
             cg = g;
             cb = b;
             ca = a;
+            ++i;
+            continue;
+        }
+        // When stripping for a solid outline pass, still drop Spring color bytes.
+        if (!apply_color_codes && c == 255 && i + 3 < text.size()) {
+            i += 4;
+            continue;
+        }
+        if (!apply_color_codes && c == 8) {
             ++i;
             continue;
         }
@@ -522,8 +532,8 @@ CTLineRef hud_line(CTFontRef font, const std::string& text, float r, float g, fl
     return line;
 }
 
-constexpr int kHudAtlasW = 512;
-constexpr int kHudAtlasH = 256;
+constexpr int kHudAtlasW = 1024;
+constexpr int kHudAtlasH = 512;
 
 struct GlyphImage {
     std::vector<uint8_t> pixels;
@@ -556,13 +566,19 @@ std::string glyph_cache_key(const HudText& text) {
 
 bool raster_bitmap(const HudText& text, CachedGlyph& cached) {
     const float size = text.size < 4.f ? 4.f : (text.size > 256.f ? 256.f : text.size);
-    const float pad = text.outline ? 2.f : 1.f;
-    CTFontRef font = hud_font(text.font_path, size);
+    // Small HUD labels (income / wind / counters) blob when outlined at 1x; raster at 2x then box-filter.
+    const int ss = size < 14.f ? 3 : (size < 20.f ? 2 : 1);
+    const float raster_size = size * static_cast<float>(ss);
+    const float pad = (text.outline ? 2.f : 1.f) * static_cast<float>(ss);
+    CTFontRef font = hud_font(text.font_path, raster_size);
     if (font == nullptr) {
         return false;
     }
-    CTLineRef fill = hud_line(font, text.text, text.r, text.g, text.b, text.a);
-    CTLineRef outline = text.outline ? hud_line(font, text.text, 0.f, 0.f, 0.f, text.a) : nullptr;
+    // Fill keeps Spring \255RGB runs. Outline must be solid black on stripped plain text —
+    // otherwise mid-string colors tint the 8-offset outline the same as the fill (fat blobs).
+    CTLineRef fill = hud_line(font, text.text, text.r, text.g, text.b, text.a, true);
+    CTLineRef outline =
+        text.outline ? hud_line(font, text.text, 0.f, 0.f, 0.f, text.a, false) : nullptr;
     CFRelease(font);
     if (fill == nullptr) {
         if (outline != nullptr) {
@@ -574,19 +590,19 @@ bool raster_bitmap(const HudText& text, CachedGlyph& cached) {
     CGFloat descent = 0;
     CGFloat leading = 0;
     const double advance = CTLineGetTypographicBounds(fill, &ascent, &descent, &leading);
-    const int width = static_cast<int>(std::ceil(advance + static_cast<double>(pad) * 2.0));
-    const int height = static_cast<int>(std::ceil(static_cast<double>(ascent + descent) + static_cast<double>(pad) * 2.0));
-    if (width < 1 || height < 1 || width > 2048 || height > 512) {
+    const int hi_w = static_cast<int>(std::ceil(advance + static_cast<double>(pad) * 2.0));
+    const int hi_h = static_cast<int>(std::ceil(static_cast<double>(ascent + descent) + static_cast<double>(pad) * 2.0));
+    if (hi_w < 1 || hi_h < 1 || hi_w > 4096 || hi_h > 1024) {
         CFRelease(fill);
         if (outline != nullptr) {
             CFRelease(outline);
         }
         return false;
     }
-    std::vector<uint8_t> pixels(static_cast<size_t>(width * height * 4), 0);
+    std::vector<uint8_t> hi(static_cast<size_t>(hi_w * hi_h * 4), 0);
     CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
-    CGContextRef context = CGBitmapContextCreate(pixels.data(), static_cast<size_t>(width), static_cast<size_t>(height),
-                                                  8, static_cast<size_t>(width * 4), space,
+    CGContextRef context = CGBitmapContextCreate(hi.data(), static_cast<size_t>(hi_w), static_cast<size_t>(hi_h), 8,
+                                                  static_cast<size_t>(hi_w * 4), space,
                                                   kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
     CGColorSpaceRelease(space);
     if (context == nullptr) {
@@ -598,11 +614,16 @@ bool raster_bitmap(const HudText& text, CachedGlyph& cached) {
     }
     CGContextSetTextMatrix(context, CGAffineTransformIdentity);
     CGContextSetShouldAntialias(context, true);
+    CGContextSetAllowsAntialiasing(context, true);
     const CGFloat baseline = pad + descent;
     if (outline != nullptr) {
-        const CGFloat offsets[8][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
-        for (const CGFloat* offset : offsets) {
-            CGContextSetTextPosition(context, pad + offset[0], baseline + offset[1]);
+        // Cardinal offsets only when supersampling: diagonal 8-tap fills tiny glyphs into blobs.
+        const CGFloat cardinal[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+        const CGFloat full[8][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
+        const CGFloat (*offsets)[2] = ss > 1 ? cardinal : full;
+        const int n_off = ss > 1 ? 4 : 8;
+        for (int i = 0; i < n_off; ++i) {
+            CGContextSetTextPosition(context, pad + offsets[i][0], baseline + offsets[i][1]);
             CTLineDraw(outline, context);
         }
         CFRelease(outline);
@@ -612,11 +633,50 @@ bool raster_bitmap(const HudText& text, CachedGlyph& cached) {
     CFRelease(fill);
     CGContextRelease(context);
 
+    const int width = (hi_w + ss - 1) / ss;
+    const int height = (hi_h + ss - 1) / ss;
+    std::vector<uint8_t> pixels(static_cast<size_t>(width * height * 4), 0);
+    if (ss == 1) {
+        pixels = std::move(hi);
+    } else {
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                int sum[4] = {0, 0, 0, 0};
+                int count = 0;
+                for (int dy = 0; dy < ss; ++dy) {
+                    const int sy = y * ss + dy;
+                    if (sy >= hi_h) {
+                        continue;
+                    }
+                    for (int dx = 0; dx < ss; ++dx) {
+                        const int sx = x * ss + dx;
+                        if (sx >= hi_w) {
+                            continue;
+                        }
+                        const size_t o = static_cast<size_t>((sy * hi_w + sx) * 4);
+                        sum[0] += hi[o];
+                        sum[1] += hi[o + 1];
+                        sum[2] += hi[o + 2];
+                        sum[3] += hi[o + 3];
+                        ++count;
+                    }
+                }
+                const size_t d = static_cast<size_t>((y * width + x) * 4);
+                if (count > 0) {
+                    pixels[d] = static_cast<uint8_t>(sum[0] / count);
+                    pixels[d + 1] = static_cast<uint8_t>(sum[1] / count);
+                    pixels[d + 2] = static_cast<uint8_t>(sum[2] / count);
+                    pixels[d + 3] = static_cast<uint8_t>(sum[3] / count);
+                }
+            }
+        }
+    }
+
     cached.pixels = std::move(pixels);
     cached.width = width;
     cached.height = height;
-    cached.advance = static_cast<float>(advance);
-    cached.descent = static_cast<float>(descent);
+    cached.advance = static_cast<float>(advance / static_cast<double>(ss));
+    cached.descent = static_cast<float>(descent / static_cast<float>(ss));
     return true;
 }
 
@@ -1504,6 +1564,57 @@ bool check_hud_text(std::string& error) {
         }
         if (lit < 4) {
             error = std::string("hud text invisible bitmap: ") + c.label;
+            return false;
+        }
+    }
+    // Small outlined income-style glyphs must stay crisp: solid black outline + colored fill,
+    // not same-color blobs from mid-string runs tinting the outline pass.
+    {
+        HudText income;
+        const unsigned char raw[] = {255, 120, 235, 120, '+', '2'};
+        income.text.assign(reinterpret_cast<const char*>(raw), sizeof(raw));
+        income.x = 0;
+        income.y = 0;
+        income.size = 9.f;
+        income.r = 1.f;
+        income.g = 1.f;
+        income.b = 1.f;
+        income.a = 1.f;
+        income.outline = true;
+        GlyphImage image;
+        if (!raster_glyph(income, image)) {
+            error = "hud text income raster failed";
+            return false;
+        }
+        size_t lit = 0;
+        size_t greenish = 0;
+        size_t dark = 0;
+        for (size_t i = 0; i + 3 < image.pixels.size(); i += 4) {
+            const uint8_t b = image.pixels[i];
+            const uint8_t gch = image.pixels[i + 1];
+            const uint8_t r = image.pixels[i + 2];
+            const uint8_t a = image.pixels[i + 3];
+            if (a < 20) {
+                continue;
+            }
+            ++lit;
+            if (gch > r + 20 && gch > b + 20) {
+                ++greenish;
+            }
+            if (r < 40 && gch < 40 && b < 40) {
+                ++dark;
+            }
+        }
+        if (lit < 8) {
+            error = "hud text income invisible";
+            return false;
+        }
+        if (dark * 4 < lit) {
+            error = "hud text income outline missing (blob)";
+            return false;
+        }
+        if (greenish < 2) {
+            error = "hud text income fill not green";
             return false;
         }
     }

@@ -98,6 +98,40 @@ for y in range(y0, h):
         topbar_text += 1
 assert topbar_text >= 40, ("missing top bar text pixels", topbar_text)
 
+# Wind box + com counter: bright glyph pixels in the right-hand pods (bar-hud2 baseline).
+wind_lit = 0
+counter_lit = 0
+income_edge = 0
+income_colored = 0
+for y in range(y0, h):
+    for x in range(int(w * 0.55), int(w * 0.68)):
+        r, g, b = px(rgb, w, h, x, y)
+        if max(r, g, b) >= 160 and not (abs(r - g) < 10 and abs(g - b) < 10 and max(r, g, b) < 180):
+            wind_lit += 1
+    for x in range(int(w * 0.66), int(w * 0.80)):
+        r, g, b = px(rgb, w, h, x, y)
+        if max(r, g, b) >= 160 and not (abs(r - g) < 10 and abs(g - b) < 10 and max(r, g, b) < 180):
+            counter_lit += 1
+    for x in range(int(w * 0.28), int(w * 0.52)):
+        r, g, b = px(rgb, w, h, x, y)
+        bright = max(r, g, b)
+        if bright < 100:
+            continue
+        colored = (g > r + 25 and g > b + 20) or (r > g + 25 and r > b + 20)
+        if not colored:
+            continue
+        income_colored += 1
+        # Crisp edge: a 4-neighbor is much darker (not a soft blob).
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            rr, gg, bb = px(rgb, w, h, x + dx, y + dy)
+            if bright - max(rr, gg, bb) > 45:
+                income_edge += 1
+                break
+assert wind_lit >= 20, ("missing wind box text pixels", wind_lit)
+assert counter_lit >= 8, ("missing counter box text pixels", counter_lit)
+assert income_colored >= 20, ("missing income colored pixels", income_colored)
+assert income_edge * 2 >= income_colored, ("income glyphs too blob-like", income_edge, income_colored)
+
 # 2) No oversized top-bar rectangle: contiguous grey under the pods must stay
 #    within a thin strip (topbar is ~vsy*0.0425 ≈ 78px at 1846).
 top_flat = 0
