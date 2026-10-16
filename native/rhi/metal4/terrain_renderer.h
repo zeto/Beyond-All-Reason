@@ -11,6 +11,10 @@ namespace bar {
 struct TerrainFrame {
     void* metal_layer = nullptr;
     const float* view_proj = nullptr;
+    // World-space camera position (Recoil cameraPos; SMF specular half vector, unit V).
+    const float* eye = nullptr;
+    // Sim frame for the CUS flashlight term (selfIllumMod). Bookmark shots run no sim: 0.
+    int sim_frame = 0;
     const char* screenshot_ppm = nullptr;
     // Widget draw list from the sim tick. Null skips the HUD pass.
     const HudList* hud = nullptr;

@@ -6,8 +6,11 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 #include "gl/image_cache.h"
+#include "smf_textures.h"
 
+#include <algorithm>
 #include <cmath>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <cstdio>
@@ -29,6 +32,8 @@ struct FrameSlot {
     id<MTL4CommandAllocator> allocator = nil;
     id<MTL4CommandBuffer> command_buffer = nil;
     id<MTLBuffer> uniforms = nil;
+    // Six TerrainUniforms, one per reflection cube face.
+    id<MTLBuffer> face_uniforms = nil;
     id<MTLBuffer> pieces = nil;
     id<MTLTexture> hud_atlas = nil;
     id<MTLBuffer> hud_color = nil;
@@ -57,7 +62,34 @@ struct TerrainUniforms {
     float marker[4];
     float shadow_vp[16];
     float shadow[4];
+    float eye[4];
+    float ground_specular[4];
+    float splat_scales[4];
+    float splat_mults[4];
+    float smf_flags[4];
+    float map[4];
+    float water_base[4];
+    float water_min[4];
+    float water_absorb[4];
+    float unit_ambient[4];
+    float unit_diffuse[4];
+    float unit_specular[4];
+    // CUS: x simFrame, y unitID, z 1 when normalTex is bound, w unused.
+    float unit_frame[4];
+    // Inverse of view_proj (sky_fs rebuilds the view ray per pixel).
+    float sky_inv[16];
+    // Water planeColor (xyz), w 1 when the map has a water plane (CubeMapFS.glsl).
+    float plane_color[4];
 };
+
+// terrain_fs texture slots. Slot 2 is the shadow map.
+enum GroundSlot { kGroundDiffuse = 0, kGroundNormals = 1, kGroundSpecular = 3, kGroundSplatDistr = 4,
+                  kGroundBlendNormals = 5, kGroundSplatNormal0 = 6, kGroundSlots = 10 };
+// Above the ground slots: atmosphere.skyBox cube and the $reflection cube (model_fs).
+enum { kSkyCubeSlot = 10, kReflectionSlot = 11, kTextureSlots = 12 };
+// Recoil CubeTexSizeReflection default; the oracle config does not set it, and BAR's
+// api_pbr_enabler only changes the config after the cubemap exists.
+constexpr NSUInteger kReflectionSize = 128;
 
 // Shadow map edge in texels. One map covers the whole visible ground (no cascades yet), so 4096.
 constexpr NSUInteger kShadowSize = 4096;
@@ -98,6 +130,17 @@ struct TerrainRenderer::Impl {
     id<MTLBuffer> model_indices = nil;
     id<MTLTexture> model_color = nil;
     id<MTLTexture> model_other = nil;
+    id<MTLTexture> model_normal = nil;
+    id<MTLTexture> brdf_lut = nil;
+    id<MTLTexture> sky_cube = nil;
+    id<MTLTexture> reflection = nil;
+    id<MTLTexture> reflection_depth = nil;
+    id<MTLRenderPipelineState> sky_pipeline = nil;
+    id<MTLDepthStencilState> sky_depth = nil;
+    // CubeMapHandler renders one reflection face per frame; the first frame fills all six.
+    int reflection_face = 0;
+    bool reflection_primed = false;
+    float plane_color[4] = {0, 0, 0, 0};
     id<MTLSamplerState> sampler = nil;
     id<MTLTexture> depth = nil;
     id<MTLTexture> offscreen = nil;
@@ -124,6 +167,19 @@ struct TerrainRenderer::Impl {
     float sun[3] = {0, 1, 0};
     float ambient[3] = {0.35f, 0.35f, 0.35f};
     float diffuse[3] = {1, 1, 1};
+    // SMF ground maps by GroundSlot (slot 2 stays nil) and the uniforms that gate them.
+    id<MTLTexture> ground[kGroundSlots] = {};
+    float ground_specular[4] = {0.1f, 0.1f, 0.1f, 100.f};
+    float splat_scales[4] = {0.02f, 0.02f, 0.02f, 0.02f};
+    float splat_mults[4] = {1, 1, 1, 1};
+    float smf_flags[4] = {0, 0, 0, 0};
+    float map[4] = {0, 0, 0, 0};
+    float water_base[4] = {0, 0, 0, 0};
+    float water_min[4] = {0, 0, 0, 0};
+    float water_absorb[4] = {0, 0, 0, 0};
+    float unit_ambient[4] = {0.4f, 0.4f, 0.4f, 0};
+    float unit_diffuse[4] = {0.7f, 0.7f, 0.7f, 0};
+    float unit_specular[4] = {0.7f, 0.7f, 0.7f, 0};
 };
 
 namespace {
@@ -264,8 +320,15 @@ struct SceneBindings {
     id<MTLTexture> metal_map;
     id<MTLTexture> model_color;
     id<MTLTexture> model_other;
+    id<MTLTexture> model_normal;
+    id<MTLTexture> brdf_lut;
+    id<MTLTexture> sky_cube;
+    id<MTLTexture> reflection;
+    id<MTLRenderPipelineState> sky_pipeline;
+    id<MTLDepthStencilState> sky_depth;
     id<MTLBuffer> pieces;
     id<MTLTexture> shadow_map;
+    const id<MTLTexture>* ground;
     id<MTLRenderPipelineState> shadow_terrain_pipeline;
     id<MTLRenderPipelineState> shadow_model_pipeline;
     NSUInteger index_count;
@@ -274,6 +337,136 @@ struct SceneBindings {
     NSUInteger model_index_count;
     bool metal_hud = false;
 };
+
+MTLPixelFormat gpu_format(GpuImage::Format format) {
+    switch (format) {
+        case GpuImage::Format::RGBA8: return MTLPixelFormatRGBA8Unorm;
+        case GpuImage::Format::BC1: return MTLPixelFormatBC1_RGBA;
+        case GpuImage::Format::BC2: return MTLPixelFormatBC2_RGBA;
+        case GpuImage::Format::BC3: return MTLPixelFormatBC3_RGBA;
+        case GpuImage::Format::RG16F: return MTLPixelFormatRG16Float;
+        default: return MTLPixelFormatInvalid;
+    }
+}
+
+// BAR luarules/gadgets/include/GenBrdfLut.lua (api_pbr_enabler: 512x512, G_OPTION 1, 1024
+// samples, RESTRICT_BRANCHING). Texel (x, y) holds BRDF(NoV = (x + .5) / 512, roughness = (y + .5) / 512).
+GpuImage generate_brdf_lut() {
+    const int size = 512;
+    const uint32_t samples = 1024;
+    const float pi = 3.14159265358979323846f;
+    GpuImage image;
+    image.format = GpuImage::Format::RG16F;
+    image.width = size;
+    image.height = size;
+    image.levels.resize(1);
+    image.levels[0].resize(static_cast<size_t>(size) * size * 4);
+    auto row_job = [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            const float roughness = (y + 0.5f) / size;
+            const float r2 = roughness * roughness;
+            const float k = r2 / 2.f;
+            for (int x = 0; x < size; ++x) {
+                const float nov = (x + 0.5f) / size;
+                const float vx = std::sqrt(1.f - nov * nov);
+                const float vz = nov;
+                float a = 0.f;
+                float b = 0.f;
+                for (uint32_t i = 0; i < samples; ++i) {
+                    uint32_t bits = (i << 16u) | (i >> 16u);
+                    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+                    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+                    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+                    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+                    const float xi_x = static_cast<float>(i) / samples;
+                    const float xi_y = static_cast<float>(bits) * 2.3283064365386963e-10f;
+                    const float phi = 2.f * pi * xi_x;
+                    const float cos2 = (1.f - xi_y) / (1.f + (r2 * r2 - 1.f) * xi_y);
+                    const float cos_t = std::sqrt(cos2);
+                    const float sin_t = std::sqrt(std::max(0.f, 1.f - cos2));
+                    // N = +z, so tangentX = +x and tangentY = +y.
+                    float hx = sin_t * std::cos(phi);
+                    float hy = sin_t * std::sin(phi);
+                    float hz = cos_t;
+                    const float hl = std::sqrt(hx * hx + hy * hy + hz * hz);
+                    hx /= hl;
+                    hy /= hl;
+                    hz /= hl;
+                    const float vdh = vx * hx + vz * hz;
+                    const float lz = 2.f * vdh * hz - vz;
+                    const float dot_nl = std::max(lz, 0.f);
+                    const float dot_vh = std::max(vdh, 0.f);
+                    const float dot_nv = std::clamp(vz, 0.0000001f, 1.f);
+                    const float dot_nh = std::clamp(hz, 0.0000001f, 1.f);
+                    const float gl = dot_nl / (dot_nl * (1.f - k) + k);
+                    const float gv = dot_nv / (dot_nv * (1.f - k) + k);
+                    const float g_vis = (gl * gv * dot_vh) / (dot_nh * dot_nv);
+                    const float fc = std::pow(1.f - dot_vh, 5.f);
+                    if (dot_nl > 0.f) {
+                        a += (1.f - fc) * g_vis;
+                        b += fc * g_vis;
+                    }
+                }
+                _Float16* out = reinterpret_cast<_Float16*>(image.levels[0].data()) + (static_cast<size_t>(y) * size + x) * 2;
+                out[0] = static_cast<_Float16>(a / samples);
+                out[1] = static_cast<_Float16>(b / samples);
+            }
+        }
+    };
+    const int threads = 8;
+    std::vector<std::thread> pool;
+    for (int t = 0; t < threads; ++t) {
+        pool.emplace_back(row_job, size * t / threads, size * (t + 1) / threads);
+    }
+    for (std::thread& thread : pool) {
+        thread.join();
+    }
+    return image;
+}
+
+id<MTLTexture> upload_image(id<MTLDevice> device, const GpuImage& image) {
+    if (!image.valid()) {
+        return nil;
+    }
+    const bool cube = image.faces == 6;
+    const int mips = image.mip_count();
+    MTLTextureDescriptor* desc =
+        cube ? [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:gpu_format(image.format)
+                                                                     size:image.width
+                                                                mipmapped:NO]
+             : [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:gpu_format(image.format)
+                                                                  width:image.width
+                                                                 height:image.height
+                                                              mipmapped:NO];
+    desc.mipmapLevelCount = mips;
+    desc.usage = MTLTextureUsageShaderRead;
+    desc.storageMode = MTLStorageModeShared;
+    id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+    if (texture == nil) {
+        return nil;
+    }
+    const bool block = image.format == GpuImage::Format::BC1 || image.format == GpuImage::Format::BC2 ||
+                       image.format == GpuImage::Format::BC3;
+    const NSUInteger block_bytes = image.format == GpuImage::Format::BC1 ? 8 : 16;
+    const NSUInteger pixel_bytes = image.format == GpuImage::Format::RGBA8 ? 4 : 4;  // RG16F is 4 bytes too
+    for (int face = 0; face < image.faces; ++face) {
+        NSUInteger w = image.width;
+        NSUInteger h = image.height;
+        for (int level = 0; level < mips; ++level) {
+            const NSUInteger row = block ? std::max<NSUInteger>(1, (w + 3) / 4) * block_bytes : w * pixel_bytes;
+            const NSUInteger rows = block ? std::max<NSUInteger>(1, (h + 3) / 4) : h;
+            [texture replaceRegion:MTLRegionMake2D(0, 0, w, h)
+                       mipmapLevel:level
+                             slice:face
+                         withBytes:image.levels[static_cast<size_t>(face * mips + level)].data()
+                       bytesPerRow:row
+                     bytesPerImage:row * rows];
+            w = std::max<NSUInteger>(1, w / 2);
+            h = std::max<NSUInteger>(1, h / 2);
+        }
+    }
+    return texture;
+}
 
 bool model_drawable(const SceneBindings& scene) {
     return scene.model_index_count > 0 && scene.model_vertices != nil && scene.model_indices != nil &&
@@ -438,6 +631,70 @@ bool fit_shadow(const float view_proj[16], const float sun[3], float height_min,
     return true;
 }
 
+void bind_ground(const SceneBindings& scene) {
+    for (int i = 0; i < kGroundSlots; ++i) {
+        if (i != 2 && scene.ground[i] != nil) {
+            [scene.arguments setTexture:scene.ground[i].gpuResourceID atIndex:i];
+        }
+    }
+    [scene.arguments setTexture:scene.shadow_map.gpuResourceID atIndex:2];
+    if (scene.sky_cube != nil) {
+        [scene.arguments setTexture:scene.sky_cube.gpuResourceID atIndex:kSkyCubeSlot];
+    }
+}
+
+void draw_sky(id<MTL4RenderCommandEncoder> encoder, const SceneBindings& scene) {
+    if (scene.sky_cube == nil || scene.sky_pipeline == nil) {
+        return;
+    }
+    [encoder setRenderPipelineState:scene.sky_pipeline];
+    [encoder setDepthStencilState:scene.sky_depth];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+}
+
+// CubeMapHandler::CreateReflectionFace: clear to fog colour, sky, then the ground
+// (DrawPass::TerrainReflection) from the camera position with a 90 degree face camera.
+void encode_reflection(id<MTL4CommandBuffer> command_buffer, const SceneBindings& scene, id<MTLTexture> cube,
+                       id<MTLTexture> depth, id<MTLBuffer> face_uniforms, id<MTLBuffer> main_uniforms,
+                       const bool faces[6], MTLClearColor clear) {
+    for (int face = 0; face < 6; ++face) {
+        if (!faces[face]) {
+            continue;
+        }
+        MTL4RenderPassDescriptor* pass = [MTL4RenderPassDescriptor new];
+        pass.colorAttachments[0].texture = cube;
+        pass.colorAttachments[0].slice = face;
+        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        pass.colorAttachments[0].clearColor = clear;
+        pass.depthAttachment.texture = depth;
+        pass.depthAttachment.loadAction = MTLLoadActionClear;
+        pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+        pass.depthAttachment.clearDepth = 1.0;
+        id<MTL4RenderCommandEncoder> encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
+        MTLViewport viewport{0, 0, static_cast<double>(cube.width), static_cast<double>(cube.height), 0, 1};
+        [encoder setViewport:viewport];
+        [encoder setCullMode:MTLCullModeNone];
+        [encoder setArgumentTable:scene.arguments atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+        [scene.arguments setAddress:face_uniforms.gpuAddress + face * sizeof(TerrainUniforms) atIndex:0];
+        bind_ground(scene);
+        draw_sky(encoder, scene);
+        [scene.arguments setAddress:scene.vertices.gpuAddress atIndex:1];
+        [encoder setRenderPipelineState:scene.terrain_pipeline];
+        [encoder setDepthStencilState:scene.terrain_depth];
+        [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                             indexCount:scene.index_count
+                              indexType:MTLIndexTypeUInt32
+                            indexBuffer:scene.indices.gpuAddress
+                      indexBufferLength:scene.indices.length];
+        [encoder barrierAfterStages:MTLStageFragment
+                  beforeQueueStages:MTLStageFragment
+                  visibilityOptions:MTL4VisibilityOptionDevice];
+        [encoder endEncoding];
+    }
+    [scene.arguments setAddress:main_uniforms.gpuAddress atIndex:0];
+}
+
 void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, id<MTLTexture> depth,
                   const SceneBindings& scene, MTLClearColor clear) {
     MTL4RenderPassDescriptor* pass = [MTL4RenderPassDescriptor new];
@@ -458,9 +715,9 @@ void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, i
     [encoder setArgumentTable:scene.arguments atStages:MTLRenderStageVertex | MTLRenderStageFragment];
 
     // Model draws reuse texture slots 0 and 1, so terrain binds its own maps first.
-    [scene.arguments setTexture:scene.minimap.gpuResourceID atIndex:0];
-    [scene.arguments setTexture:scene.metal_map.gpuResourceID atIndex:1];
-    [scene.arguments setTexture:scene.shadow_map.gpuResourceID atIndex:2];
+    bind_ground(scene);
+    // CSkyBox::Draw before the ground.
+    draw_sky(encoder, scene);
     [scene.arguments setAddress:scene.vertices.gpuAddress atIndex:1];
     [encoder setRenderPipelineState:scene.terrain_pipeline];
     [encoder setDepthStencilState:scene.terrain_depth];
@@ -473,6 +730,11 @@ void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, i
     if (model_drawable(scene)) {
         [scene.arguments setTexture:scene.model_color.gpuResourceID atIndex:0];
         [scene.arguments setTexture:scene.model_other.gpuResourceID atIndex:1];
+        // model_fs slot 3 normalTex, slot 4 brdfLUT. Without a normal map the flag skips slot 3.
+        id<MTLTexture> normal = scene.model_normal != nil ? scene.model_normal : scene.model_color;
+        [scene.arguments setTexture:normal.gpuResourceID atIndex:3];
+        [scene.arguments setTexture:scene.brdf_lut.gpuResourceID atIndex:4];
+        [scene.arguments setTexture:scene.reflection.gpuResourceID atIndex:kReflectionSlot];
         [scene.arguments setAddress:scene.model_vertices.gpuAddress atIndex:1];
         [scene.arguments setAddress:scene.pieces.gpuAddress atIndex:2];
         [encoder setRenderPipelineState:scene.model_pipeline];
@@ -1334,6 +1596,11 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
         [impl_->residency addAllocation:impl_->shadow_map];
     }
     impl_->ring_pipeline = make_pipeline(compiler, library, @"terrain_vs", @"ring_fs", true, &ns_error_obj);
+    impl_->sky_pipeline = make_pipeline(compiler, library, @"sky_vs", @"sky_fs", false, &ns_error_obj);
+    if (impl_->sky_pipeline == nil) {
+        error = ns_error(ns_error_obj, "sky pipeline creation failed");
+        return false;
+    }
     if (impl_->ring_pipeline == nil) {
         error = ns_error(ns_error_obj, "metal spot ring pipeline creation failed");
         return false;
@@ -1362,6 +1629,11 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
     water_depth.depthCompareFunction = MTLCompareFunctionLess;
     water_depth.depthWriteEnabled = NO;
     impl_->water_depth = [impl_->device newDepthStencilStateWithDescriptor:water_depth];
+    // CubeMapVS writes depth 1 (xyww) under GL_LEQUAL with no depth writes: always behind.
+    MTLDepthStencilDescriptor* sky_depth = [MTLDepthStencilDescriptor new];
+    sky_depth.depthCompareFunction = MTLCompareFunctionLessEqual;
+    sky_depth.depthWriteEnabled = NO;
+    impl_->sky_depth = [impl_->device newDepthStencilStateWithDescriptor:sky_depth];
     if (impl_->terrain_depth == nil || impl_->water_depth == nil) {
         error = "depth state creation failed";
         return false;
@@ -1377,6 +1649,11 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
     bool slot_buffers = true;
     for (FrameSlot& slot : impl_->slots) {
         slot.uniforms = [impl_->device newBufferWithLength:sizeof(TerrainUniforms) options:MTLResourceStorageModeShared];
+        slot.face_uniforms =
+            [impl_->device newBufferWithLength:sizeof(TerrainUniforms) * 6 options:MTLResourceStorageModeShared];
+        if (slot.face_uniforms == nil) {
+            slot_buffers = false;
+        }
         slot.pieces = upload(impl_->device, impl_->piece_cpu.data(), impl_->piece_cpu.size() * sizeof(float));
         if (slot.uniforms == nil || slot.pieces == nil) {
             slot_buffers = false;
@@ -1431,6 +1708,85 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
         return false;
     }
 
+    {
+        TerrainTextures textures;
+        if (!load_terrain_textures(mesh, textures, error)) {
+            return false;
+        }
+        impl_->ground[kGroundDiffuse] = upload_image(impl_->device, textures.diffuse);
+        impl_->ground[kGroundNormals] = upload_image(impl_->device, textures.normals);
+        if (impl_->ground[kGroundDiffuse] == nil || impl_->ground[kGroundNormals] == nil) {
+            error = "SMF diffuse or normals texture upload failed";
+            return false;
+        }
+        impl_->ground[kGroundSpecular] = upload_image(impl_->device, textures.specular);
+        impl_->ground[kGroundBlendNormals] = upload_image(impl_->device, textures.blend_normals);
+        impl_->sky_cube = upload_image(impl_->device, textures.sky_box);
+        const bool splat = textures.splat_normal_count == 4 && textures.splat_distr.valid();
+        if (splat) {
+            impl_->ground[kGroundSplatDistr] = upload_image(impl_->device, textures.splat_distr);
+            for (int i = 0; i < 4; ++i) {
+                impl_->ground[kGroundSplatNormal0 + i] = upload_image(impl_->device, textures.splat_normals[i]);
+            }
+        }
+        // Unused slots still need a bound texture; the flags keep the shader off them.
+        for (int i = 0; i < kGroundSlots; ++i) {
+            if (i != 2 && impl_->ground[i] == nil) {
+                impl_->ground[i] = impl_->ground[kGroundNormals];
+            }
+        }
+        // HaveSplatNormalTexture needs every splatDetailNormalTex the shader samples (4 here).
+        impl_->smf_flags[0] = textures.specular.valid() ? 1.f : 0.f;
+        impl_->smf_flags[1] = splat ? 1.f : 0.f;
+        impl_->smf_flags[2] = textures.blend_normals.valid() ? 1.f : 0.f;
+        impl_->smf_flags[3] = mesh.splat_diffuse_alpha ? 1.f : 0.f;
+        std::fprintf(stderr, "smf textures: diffuse %dx%d specular %d splat %d blend %d alpha %d\n",
+                     textures.diffuse.width, textures.diffuse.height, (int)impl_->smf_flags[0],
+                     (int)impl_->smf_flags[1], (int)impl_->smf_flags[2], (int)impl_->smf_flags[3]);
+    }
+    {
+        MTLTextureDescriptor* cube_desc =
+            [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                  size:kReflectionSize
+                                                             mipmapped:NO];
+        cube_desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        cube_desc.storageMode = MTLStorageModePrivate;
+        impl_->reflection = [impl_->device newTextureWithDescriptor:cube_desc];
+        MTLTextureDescriptor* depth_desc =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                               width:kReflectionSize
+                                                              height:kReflectionSize
+                                                           mipmapped:NO];
+        depth_desc.usage = MTLTextureUsageRenderTarget;
+        depth_desc.storageMode = MTLStorageModePrivate;
+        impl_->reflection_depth = [impl_->device newTextureWithDescriptor:depth_desc];
+        if (impl_->reflection == nil || impl_->reflection_depth == nil) {
+            error = "reflection cubemap allocation failed";
+            return false;
+        }
+    }
+    std::memcpy(impl_->plane_color, mesh.water.plane_color, sizeof(float) * 3);
+    impl_->plane_color[3] = mesh.water.has_water_plane ? 1.f : 0.f;
+    impl_->brdf_lut = upload_image(impl_->device, generate_brdf_lut());
+    if (impl_->brdf_lut == nil) {
+        error = "BRDF LUT upload failed";
+        return false;
+    }
+    std::memcpy(impl_->ground_specular, mesh.specular, sizeof(float) * 3);
+    impl_->ground_specular[3] = mesh.specular_exponent;
+    std::memcpy(impl_->splat_scales, mesh.splat_scales, sizeof(impl_->splat_scales));
+    std::memcpy(impl_->splat_mults, mesh.splat_mults, sizeof(impl_->splat_mults));
+    impl_->map[0] = mesh.world_x;
+    impl_->map[1] = mesh.world_z;
+    // SMF_WATER_ABSORPTION = HasVisibleWater: some ground below the water plane.
+    impl_->map[2] = mesh.min_height < 0.f ? 1.f : 0.f;
+    std::memcpy(impl_->water_base, mesh.water.base_color, sizeof(float) * 3);
+    std::memcpy(impl_->water_min, mesh.water.min_color, sizeof(float) * 3);
+    std::memcpy(impl_->water_absorb, mesh.water.absorb, sizeof(float) * 3);
+    std::memcpy(impl_->unit_ambient, mesh.unit_ambient, sizeof(float) * 3);
+    std::memcpy(impl_->unit_diffuse, mesh.unit_diffuse, sizeof(float) * 3);
+    std::memcpy(impl_->unit_specular, mesh.unit_specular, sizeof(float) * 3);
+
     MTLSamplerDescriptor* sampler_desc = [MTLSamplerDescriptor new];
     sampler_desc.minFilter = MTLSamplerMinMagFilterLinear;
     sampler_desc.magFilter = MTLSamplerMinMagFilterLinear;
@@ -1444,7 +1800,7 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
 
     MTL4ArgumentTableDescriptor* table_desc = [MTL4ArgumentTableDescriptor new];
     table_desc.maxBufferBindCount = 4;
-    table_desc.maxTextureBindCount = 3;  // 0,1 material, 2 shadow map
+    table_desc.maxTextureBindCount = kTextureSlots;  // terrain_fs: 0..9, slot 2 the shadow map
     table_desc.maxSamplerStateBindCount = 1;
     table_desc.initializeBindings = YES;
     impl_->arguments = [impl_->device newArgumentTableWithDescriptor:table_desc error:&ns_error_obj];
@@ -1488,10 +1844,26 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
     }
     for (FrameSlot& slot : impl_->slots) {
         [impl_->residency addAllocation:slot.uniforms];
+        [impl_->residency addAllocation:slot.face_uniforms];
         [impl_->residency addAllocation:slot.pieces];
     }
     [impl_->residency addAllocation:impl_->minimap];
     [impl_->residency addAllocation:impl_->metal_map];
+    [impl_->residency addAllocation:impl_->brdf_lut];
+    [impl_->residency addAllocation:impl_->reflection];
+    [impl_->residency addAllocation:impl_->reflection_depth];
+    if (impl_->sky_cube != nil) {
+        [impl_->residency addAllocation:impl_->sky_cube];
+    }
+    for (int i = 0; i < kGroundSlots; ++i) {
+        bool seen = false;
+        for (int j = 0; j < i; ++j) {
+            seen = seen || impl_->ground[j] == impl_->ground[i];
+        }
+        if (i != 2 && impl_->ground[i] != nil && !seen) {
+            [impl_->residency addAllocation:impl_->ground[i]];
+        }
+    }
     MTLTextureDescriptor* atlas_desc =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                            width:kHudAtlasW
@@ -1555,6 +1927,8 @@ bool TerrainRenderer::set_model(const ModelMesh& model, float color_r, float col
     drop(impl_->model_indices);
     drop(impl_->model_color);
     drop(impl_->model_other);
+    drop(impl_->model_normal);
+    impl_->model_normal = nil;
 
     impl_->model_vertices = upload(impl_->device, model.vertices.data(), model.vertices.size() * sizeof(TerrainVertex));
     impl_->model_indices = upload(impl_->device, model.indices.data(), model.indices.size() * sizeof(uint32_t));
@@ -1582,6 +1956,18 @@ bool TerrainRenderer::set_model(const ModelMesh& model, float color_r, float col
     [impl_->residency addAllocation:impl_->model_indices];
     [impl_->residency addAllocation:impl_->model_color];
     [impl_->residency addAllocation:impl_->model_other];
+    if (model.normal_size >= 4 && model.normal_bc3.size() ==
+            static_cast<size_t>(model.normal_size / 4) * static_cast<size_t>(model.normal_size / 4) * 16) {
+        GpuImage normal;
+        normal.format = GpuImage::Format::BC3;
+        normal.width = model.normal_size;
+        normal.height = model.normal_size;
+        normal.levels.push_back(model.normal_bc3);
+        impl_->model_normal = upload_image(impl_->device, normal);
+        if (impl_->model_normal != nil) {
+            [impl_->residency addAllocation:impl_->model_normal];
+        }
+    }
     [impl_->residency commit];
     impl_->model_index_count = model.indices.size();
     impl_->team_color[0] = color_r;
@@ -1695,7 +2081,83 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     uniforms.shadow[0] = impl_->ground_shadow_density;
     uniforms.shadow[1] = impl_->unit_shadow_density;
     uniforms.shadow[2] = shadows ? 1.f : 0.f;
+    if (frame.eye != nullptr) {
+        uniforms.eye[0] = frame.eye[0];
+        uniforms.eye[1] = frame.eye[1];
+        uniforms.eye[2] = frame.eye[2];
+    }
+    std::memcpy(uniforms.ground_specular, impl_->ground_specular, sizeof(uniforms.ground_specular));
+    std::memcpy(uniforms.splat_scales, impl_->splat_scales, sizeof(uniforms.splat_scales));
+    std::memcpy(uniforms.splat_mults, impl_->splat_mults, sizeof(uniforms.splat_mults));
+    std::memcpy(uniforms.smf_flags, impl_->smf_flags, sizeof(uniforms.smf_flags));
+    std::memcpy(uniforms.map, impl_->map, sizeof(uniforms.map));
+    std::memcpy(uniforms.water_base, impl_->water_base, sizeof(uniforms.water_base));
+    std::memcpy(uniforms.water_min, impl_->water_min, sizeof(uniforms.water_min));
+    std::memcpy(uniforms.water_absorb, impl_->water_absorb, sizeof(uniforms.water_absorb));
+    std::memcpy(uniforms.unit_ambient, impl_->unit_ambient, sizeof(uniforms.unit_ambient));
+    std::memcpy(uniforms.unit_diffuse, impl_->unit_diffuse, sizeof(uniforms.unit_diffuse));
+    std::memcpy(uniforms.unit_specular, impl_->unit_specular, sizeof(uniforms.unit_specular));
+    // Only unit 0 is drawn; its sim id is 0.
+    uniforms.unit_frame[0] = static_cast<float>(frame.sim_frame);
+    uniforms.unit_frame[1] = 0.f;
+    uniforms.unit_frame[2] = impl_->model_normal != nil ? 1.f : 0.f;
+    std::memcpy(uniforms.plane_color, impl_->plane_color, sizeof(uniforms.plane_color));
+    if (!invert4(uniforms.view_proj, uniforms.sky_inv)) {
+        std::memset(uniforms.sky_inv, 0, sizeof(uniforms.sky_inv));
+    }
     std::memcpy(slot.uniforms.contents, &uniforms, sizeof(uniforms));
+    // Reflection faces: Metal cube face (right, up, forward) per the cube-map face table
+    // (s along right, t down the face). Projection: 90 degree square, Metal depth 0..1.
+    bool reflection_faces[6] = {false, false, false, false, false, false};
+    if (frame.eye != nullptr) {
+        static const float kFaces[6][3][3] = {
+            {{0, 0, -1}, {0, 1, 0}, {1, 0, 0}},   // +X
+            {{0, 0, 1}, {0, 1, 0}, {-1, 0, 0}},   // -X
+            {{1, 0, 0}, {0, 0, -1}, {0, 1, 0}},   // +Y
+            {{1, 0, 0}, {0, 0, 1}, {0, -1, 0}},   // -Y
+            {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}},    // +Z
+            {{-1, 0, 0}, {0, 1, 0}, {0, 0, -1}},  // -Z
+        };
+        const float near_plane = 1.f;
+        const float far_plane = 2.f * std::sqrt(impl_->map[0] * impl_->map[0] + impl_->map[1] * impl_->map[1]) + 8192.f;
+        const float a = far_plane / (far_plane - near_plane);
+        const float b = -far_plane * near_plane / (far_plane - near_plane);
+        auto* faces = static_cast<TerrainUniforms*>(slot.face_uniforms.contents);
+        for (int face = 0; face < 6; ++face) {
+            const float* r = kFaces[face][0];
+            const float* u = kFaces[face][1];
+            const float* f = kFaces[face][2];
+            const float* e = frame.eye;
+            const float re = r[0] * e[0] + r[1] * e[1] + r[2] * e[2];
+            const float ue = u[0] * e[0] + u[1] * e[1] + u[2] * e[2];
+            const float fe = f[0] * e[0] + f[1] * e[1] + f[2] * e[2];
+            const float rows[4][4] = {
+                {r[0], r[1], r[2], -re},
+                {u[0], u[1], u[2], -ue},
+                {a * f[0], a * f[1], a * f[2], -a * fe + b},
+                {f[0], f[1], f[2], -fe},
+            };
+            TerrainUniforms face_u = uniforms;
+            for (int col = 0; col < 4; ++col) {
+                for (int row = 0; row < 4; ++row) {
+                    face_u.view_proj[col * 4 + row] = rows[row][col];
+                }
+            }
+            if (!invert4(face_u.view_proj, face_u.sky_inv)) {
+                std::memset(face_u.sky_inv, 0, sizeof(face_u.sky_inv));
+            }
+            faces[face] = face_u;
+        }
+        if (!impl_->reflection_primed) {
+            for (bool& face : reflection_faces) {
+                face = true;
+            }
+            impl_->reflection_primed = true;
+        } else {
+            reflection_faces[impl_->reflection_face] = true;
+            impl_->reflection_face = (impl_->reflection_face + 1) % 6;
+        }
+    }
     if (slot.pieces != nil && impl_->piece_cpu.size() * sizeof(float) == slot.pieces.length) {
         std::memcpy(slot.pieces.contents, impl_->piece_cpu.data(), slot.pieces.length);
     }
@@ -1795,8 +2257,15 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     scene.metal_map = impl_->metal_map;
     scene.model_color = impl_->model_color;
     scene.model_other = impl_->model_other;
+    scene.model_normal = impl_->model_normal;
+    scene.brdf_lut = impl_->brdf_lut;
+    scene.sky_cube = impl_->sky_cube;
+    scene.reflection = impl_->reflection;
+    scene.sky_pipeline = impl_->sky_pipeline;
+    scene.sky_depth = impl_->sky_depth;
     scene.pieces = slot.pieces;
     scene.shadow_map = impl_->shadow_map;
+    scene.ground = impl_->ground;
     scene.shadow_terrain_pipeline = impl_->shadow_terrain_pipeline;
     scene.shadow_model_pipeline = impl_->shadow_model_pipeline;
     scene.index_count = impl_->index_count;
@@ -1810,6 +2279,8 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     [slot.command_buffer beginCommandBufferWithAllocator:slot.allocator];
     [slot.command_buffer useResidencySet:impl_->residency];
     encode_shadow(slot.command_buffer, scene);
+    encode_reflection(slot.command_buffer, scene, impl_->reflection, impl_->reflection_depth, slot.face_uniforms,
+                      slot.uniforms, reflection_faces, clear);
     encode_scene(slot.command_buffer, drawable.texture, impl_->depth, scene, clear);
     encode_hud((__bridge void*)slot.command_buffer, (__bridge void*)drawable.texture);
     if (shot) {

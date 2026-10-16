@@ -865,6 +865,7 @@ int run_terrain(const Options& options, const std::string& game_name) {
                     bar::TerrainFrame frame;
                     frame.metal_layer = (__bridge void*)layer;
                     frame.view_proj = pose.view_proj;
+                    frame.eye = pose.eye;
                     frame.screenshot_ppm = path.c_str();
                     place_model(shot.camera.distance);
                     if (!renderer.draw(frame, error)) {
@@ -1457,6 +1458,8 @@ int run_terrain(const Options& options, const std::string& game_name) {
             bar::TerrainFrame frame;
             frame.metal_layer = (__bridge void*)layer;
             frame.view_proj = pose.view_proj;
+            frame.eye = pose.eye;
+            frame.sim_frame = sim_frame;
             frame.hud = bar::hud_list();
             std::string shot_path;
             if (scripted && !options.screenshot_dir.empty()) {
