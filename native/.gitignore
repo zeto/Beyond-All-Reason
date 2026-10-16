@@ -1,3 +1,4 @@
 /build/
 oracle/out/
 .DS_Store
+tools/.flip-venv/

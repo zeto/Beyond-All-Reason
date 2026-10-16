@@ -422,9 +422,7 @@ M7 widget layers keep the bars introduced for `gate --suite m7widgets`
 (select/build/minimap/health Recoil traces and self-only pixel floors).
 Those numbers have not moved.
 
-Official M7 is not green yet. The player checklist self-check and its
-sim-side Recoil traces (click_select, shift_queue, attack, pause_speed,
-reclaim, repair, facing) are in. drag_box and control_groups stay
-self-only. HUD FLIP bookmarks at or under `m7_flip` 0.22 are still
-required. `gate --suite m7` stays red until `m7flip/flip.json` passes.
-The ai_10min floors and earlier milestone bars have not moved.
+Official M7 is not green yet. The plan exit is checklist complete plus HUD
+FLIP bookmarks at or under `m7_flip` 0.22. `gate --suite m7` stays red
+until `m7checklist/checklist.json` and `m7flip/flip.json` both pass. The
+ai_10min floors and earlier milestone bars have not moved.

@@ -1,13 +1,9 @@
-# ai 10min
+# m7
 
-Scenario: ai_10min
+Scenario: M7 player checklist + HUD FLIP bookmarks
 
-Entity: two Armada SimpleAI commanders on Supreme Isthmus
+Plan exit: checklist complete, HUD bookmarks under the M7 FLIP bar (0.22).
 
-Field: both still playing at 10 minutes, each with extractor income
+Native value: FLIP median 0.904543.
 
-Frame 18000 units 116 armcoms 2 mex 6.9099 6.9006
-
-Both commanders stay in the trace and both teams have finished an extractor. Winner is none while both commanders remain. This gate does not compare stocks to a Recoil trace.
-
-The ai_10min self-check passed on engine output. Both SimpleAI commanders are in the frame 18000 trace and both teams have extractor income. Winner is none. This is not a Recoil comparison. The M6 milestone stays red until a Recoil trace shows the two resource totals within 15%. m1 stays red without reference pictures. The M4 milestone stays red until eco_t1, build_tank, and reclaim match a Recoil trace at 2%. The M5 milestone stays red until the duel corpus is within 15% time to kill of a Recoil trace.
+Tolerance: median FLIP <= 0.22.

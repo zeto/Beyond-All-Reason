@@ -1315,46 +1315,49 @@ make a gate green.
 
 ## M7 HUD
 
-Plan exit (authoritative, `native/PLAN.md`): checklist complete, HUD
-bookmarks under the M7 FLIP bar (0.22).
+Plan exit (authoritative): checklist complete, HUD bookmarks under the M7 FLIP
+bar (0.22, layout and information present; font raster may differ).
 
 ### Widget layers (done)
 
-Verified by `gate --suite m7widgets`: resource bar/selection/cursors, build
-menu+preview, minimap, health/range/tooltip, Retina/default widgets.
-Recoil traces: select_commander, build_mex, minimap_move (equiv MOVE),
-health_range. Only unit 0 is drawn.
+The five widget layers from the plan are implemented and verified by
+`gate --suite m7widgets` (formerly the premature `gate --suite m7`):
 
-### Player checklist (done)
+1. Resource bar, selection, and order cursors
+2. Build menu and build preview on the terrain
+3. Minimap
+4. Health bars, range rings, tooltip
+5. Remaining default-on widgets exercised by the Retina/window self-check
 
-`check_m7checklist.sh` exited 0. Items:
-
-| Item | Self | Oracle |
-|---|---|---|
-| left-click select | pass | click_select cmd 10 |
-| drag box | pass | self-only (UI geometry) |
-| shift-queue | pass | shift_queue MOVE+shift |
-| right-click attack | pass | attack cmd 20 |
-| build facing | pass | facing 2 |
-| control groups 1–9 | pass | self-only (client UI) |
-| pause | pass | pause_speed event |
-| gamespeed 1–4 | pass | pause_speed event |
-| reclaim | pass | reclaim cmd 90 |
-| repair | pass | repair cmd 40 |
+`check_m7select.sh`, `check_m7build.sh`, `check_m7minimap.sh`,
+`check_m7hud.sh`, and `check_m7window.sh` exited 0. `gate --suite m7widgets`
+exits 0 against recorded outs and Recoil traces `select_commander`,
+`build_mex`, `minimap_move` (equivalent CMD.MOVE), and `health_range`.
+Pixels for those layers stay self-only where no Recoil HUD framebuffer
+oracle exists. Only unit 0 is drawn. GL4 geometry-shader effects stay
+deferred to M8.
 
 ### Outstanding for official M7
 
-HUD FLIP bookmarks under `m7_flip` 0.22 against headed Recoil reference
-shots. `gate --suite m7` stays red until `m7flip/flip.json` passes (checklist
-json alone is not enough).
+- Player checklist: left-click select, drag box, shift-queue, right-click
+  move and attack, build facing with the existing key, control groups 1–9,
+  pause, gamespeed 1–4, reclaim and repair orders. Each item needs a
+  scripted self-check and, where sim-side, a Recoil trace on PIN.
+- HUD FLIP bookmarks under bar 0.22 against headed Recoil reference shots.
+
+`gate --suite m7` is the official suite: it requires
+`oracle/out/m7checklist/checklist.json` with every checklist item true and
+`oracle/out/m7flip/flip.json` with median FLIP <= `m7_flip` (0.22). It is
+red until both exist and pass. Do not call M7 green on widget layers alone.
 
 Directories: `native/ui`, `native/lua/gl`, `native/rhi/metal4`,
 `native/shell`, `native/tools/gate`, `native/tools/check_m7*.sh`,
-`native/oracle/recoil`, `native/oracle/traces`, `native/PLAN.md`.
+`native/oracle/recoil`, `native/oracle/traces`.
 
-Do not rewrite: closed weapon formulas, LOS, wreck path, team tick, stock
-game tree. Do not draw projectiles, billboards, wrecks, or extra unit
-meshes. Do not loosen tolerances.
+Do not rewrite: the closed weapon formulas, the LOS path, the wreck
+path, the team tick, or the stock game tree. Do not draw projectiles,
+billboards, wrecks, or extra unit meshes. Do not stub gadget or widget
+bodies. Do not implement the whole Spring or gl surface up front.
 
-Tolerance: widget-layer `[m7]` bars unchanged. Official exit adds
+Tolerance: widget-layer bars in `[m7]` are unchanged. Official exit adds
 `m7_flip = 0.22`. Do not lower these to make a gate green.

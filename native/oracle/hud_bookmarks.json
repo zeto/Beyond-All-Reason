@@ -1,0 +1,46 @@
+{
+  "map": "Supreme Isthmus v2.1",
+  "resolution": {"width": 1280, "height": 720},
+  "camera": {
+    "id": "commander_lock",
+    "note": "Matches bar-metal --lock-camera: target unit xz, y+30; distance 400; tilt 1; yaw pi",
+    "x": 7600,
+    "y": 90,
+    "z": 4900,
+    "distance": 400,
+    "tilt": 1.0,
+    "yaw": 3.14159265
+  },
+  "shots": [
+    {
+      "id": "select",
+      "layer": 1,
+      "desc": "Resource bar, selection, and order cursors",
+      "hud": {"select": true, "order": "move"}
+    },
+    {
+      "id": "build",
+      "layer": 2,
+      "desc": "Build menu and build preview on the terrain",
+      "hud": {"select": true, "build": "armmex"}
+    },
+    {
+      "id": "minimap",
+      "layer": 3,
+      "desc": "Minimap",
+      "hud": {"select": true, "minimap": true}
+    },
+    {
+      "id": "hud",
+      "layer": 4,
+      "desc": "Health bars, range rings, tooltip",
+      "hud": {"select": true, "damage_frac": 0.5, "hover": true}
+    },
+    {
+      "id": "widgets",
+      "layer": 5,
+      "desc": "Remaining default-on widgets (top bar chrome)",
+      "hud": {"select": true, "default_widgets": true}
+    }
+  ]
+}
