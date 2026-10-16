@@ -101,6 +101,8 @@ struct MapInfo {
     float ambient[3] = {0.35f, 0.35f, 0.35f};
     float diffuse[3] = {1.2f, 1.2f, 1.2f};
     float sky[3] = {0.43f, 0.58f, 0.64f};
+    float ground_shadow_density = 0.8f;
+    float unit_shadow_density = 0.8f;
     // Spring uses 100 when a map omits extractorRadius. Recoil's maxMetal default is 0.02.
     float extractor_radius = 100.f;
     float max_metal = 0.02f;
@@ -195,6 +197,17 @@ bool read_mapinfo(const std::vector<uint8_t>& bytes, MapInfo& info, std::string&
         lua_pop(state, 1);
         lua_getfield(state, -1, "grounddiffusecolor");
         read_vec3(state, info.diffuse);
+        lua_pop(state, 1);
+        // Recoil MapInfo: groundShadowDensity / unitShadowDensity, default 0.8, clamped to [0, 1].
+        lua_getfield(state, -1, "groundshadowdensity");
+        if (lua_isnumber(state, -1)) {
+            info.ground_shadow_density = static_cast<float>(lua_tonumber(state, -1));
+        }
+        lua_pop(state, 1);
+        lua_getfield(state, -1, "unitshadowdensity");
+        if (lua_isnumber(state, -1)) {
+            info.unit_shadow_density = static_cast<float>(lua_tonumber(state, -1));
+        }
         lua_pop(state, 1);
     }
     lua_pop(state, 1);
@@ -600,6 +613,8 @@ bool build_mesh(const std::vector<uint8_t>& smf, const MapInfo& info, TerrainMes
     std::memcpy(mesh.ambient, info.ambient, sizeof(mesh.ambient));
     std::memcpy(mesh.diffuse, info.diffuse, sizeof(mesh.diffuse));
     std::memcpy(mesh.sky, info.sky, sizeof(mesh.sky));
+    mesh.ground_shadow_density = std::clamp(info.ground_shadow_density, 0.f, 1.f);
+    mesh.unit_shadow_density = std::clamp(info.unit_shadow_density, 0.f, 1.f);
     mesh.starts = info.starts;
     mesh.mesh_stride = kStride;
     normalize(mesh.sun[0], mesh.sun[1], mesh.sun[2]);

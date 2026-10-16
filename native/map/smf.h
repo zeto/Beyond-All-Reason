@@ -62,6 +62,9 @@ struct TerrainMesh {
     float ambient[3] = {0.35f, 0.35f, 0.35f};
     float diffuse[3] = {1.2f, 1.2f, 1.2f};
     float sky[3] = {0.43f, 0.58f, 0.64f};
+    // mapinfo lighting groundShadowDensity / unitShadowDensity (Recoil default 0.8, clamped 0..1).
+    float ground_shadow_density = 0.8f;
+    float unit_shadow_density = 0.8f;
     std::vector<MapStart> starts;
 };
 
