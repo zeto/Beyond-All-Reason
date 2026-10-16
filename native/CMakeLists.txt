@@ -18,6 +18,7 @@ find_library(BAR_QUARTZ QuartzCore REQUIRED)
 find_library(BAR_FOUNDATION Foundation REQUIRED)
 find_library(BAR_CORETEXT CoreText REQUIRED)
 find_library(BAR_COREGRAPHICS CoreGraphics REQUIRED)
+find_library(BAR_IMAGEIO ImageIO REQUIRED)
 find_library(BAR_Z z REQUIRED)
 
 set(LUA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lua-5.1.5/src)
@@ -71,6 +72,7 @@ add_executable(bar-metal
   sim/weapon/dgun.cpp
   sim/los/los.cpp
   lua/gl/gl_api.cpp
+  lua/gl/image_cache.cpp
   ui/widget_host.cpp
   ui/selection.cpp
   ui/checklist.cpp
@@ -103,6 +105,7 @@ target_link_libraries(bar-metal PRIVATE
   ${BAR_FOUNDATION}
   ${BAR_CORETEXT}
   ${BAR_COREGRAPHICS}
+  ${BAR_IMAGEIO}
 )
 
 add_custom_command(TARGET bar-metal POST_BUILD

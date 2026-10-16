@@ -14,6 +14,10 @@ struct HudVertex {
     float g = 1;
     float b = 1;
     float a = 1;
+    // Texture coords and image id (image_cache). image 0 is a solid color quad.
+    float u = 0;
+    float v = 0;
+    int image = 0;
 };
 
 // A glyph run. align is 0 left, 1 center, 2 right. y is the baseline.

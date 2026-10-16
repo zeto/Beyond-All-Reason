@@ -5,7 +5,11 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
+#include "gl/image_cache.h"
+
 #include <cmath>
+#include <unordered_map>
+#include <vector>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -35,6 +39,9 @@ struct FrameSlot {
     NSUInteger hud_text_count = 0;
     NSUInteger hud_minimap_count = 0;
     NSUInteger hud_marker_count = 0;
+    // Draw-order runs over hud_color: image 0 is solid color, else an image_cache id.
+    struct HudSeg { NSUInteger start; NSUInteger count; int image; };
+    std::vector<HudSeg> hud_segments;
     uint64_t ticket = 0;
     bool pending = false;
 };
@@ -62,6 +69,8 @@ struct TerrainRenderer::Impl {
     id<MTLRenderPipelineState> ring_pipeline = nil;
     id<MTLRenderPipelineState> hud_color_pipeline = nil;
     id<MTLRenderPipelineState> hud_text_pipeline = nil;
+    id<MTLRenderPipelineState> hud_image_pipeline = nil;
+    std::unordered_map<int, id<MTLTexture>> hud_images;
     id<MTLDepthStencilState> terrain_depth = nil;
     id<MTLDepthStencilState> water_depth = nil;
     id<MTL4ArgumentTable> arguments = nil;
@@ -126,6 +135,7 @@ void retire_slot(id<MTLResidencySet> residency, FrameSlot& slot) {
     }
     slot.hud_color_count = 0;
     slot.hud_text_count = 0;
+    slot.hud_segments.clear();
     slot.hud_minimap_count = 0;
     slot.hud_marker_count = 0;
     if (slot.allocator != nil) {
@@ -739,6 +749,7 @@ void TerrainRenderer::release_hud() {
     slot->hud_text_count = 0;
     slot->hud_minimap_count = 0;
     slot->hud_marker_count = 0;
+    slot->hud_segments.clear();
 }
 
 bool TerrainRenderer::prepare_hud(const HudList* list, std::string& error) {
@@ -751,14 +762,50 @@ bool TerrainRenderer::prepare_hud(const HudList* list, std::string& error) {
     const float view_h = list->height > 0 ? static_cast<float>(list->height) : 720.f;
     std::vector<HudGpuVertex> color;
     color.reserve(list->vertices.size() / 4 * 6);
+    std::vector<FrameSlot::HudSeg> segments;
+    bool new_images = false;
     for (size_t i = 0; i + 3 < list->vertices.size(); i += 4) {
+        int image = list->vertices[i].image;
+        if (image > 0 && impl_->hud_images.find(image) == impl_->hud_images.end()) {
+            id<MTLTexture> tex = nil;
+            const auto decoded = image_get(image);
+            if (decoded && decoded->width > 0 && decoded->height > 0) {
+                MTLTextureDescriptor* desc =
+                    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                       width:decoded->width
+                                                                      height:decoded->height
+                                                                   mipmapped:NO];
+                desc.usage = MTLTextureUsageShaderRead;
+                desc.storageMode = MTLStorageModeShared;
+                tex = [impl_->device newTextureWithDescriptor:desc];
+                if (tex != nil) {
+                    [tex replaceRegion:MTLRegionMake2D(0, 0, decoded->width, decoded->height)
+                           mipmapLevel:0
+                             withBytes:decoded->rgba.data()
+                           bytesPerRow:static_cast<NSUInteger>(decoded->width) * 4];
+                    [impl_->residency addAllocation:tex];
+                    new_images = true;
+                }
+            }
+            impl_->hud_images[image] = tex;
+        }
+        if (image > 0 && impl_->hud_images[image] == nil) {
+            continue;  // undecodable: drop, never a solid stand-in
+        }
         HudGpuVertex corners[4];
         for (int corner = 0; corner < 4; ++corner) {
             const HudVertex& vert = list->vertices[i + static_cast<size_t>(corner)];
-            corners[corner] = hud_vert(vert.x, vert.y, 0, 0, vert.r, vert.g, vert.b, vert.a, view_w, view_h);
+            corners[corner] = hud_vert(vert.x, vert.y, vert.u, vert.v, vert.r, vert.g, vert.b, vert.a, view_w, view_h);
+        }
+        if (segments.empty() || segments.back().image != image) {
+            segments.push_back({static_cast<NSUInteger>(color.size()), 0, image});
         }
         append_triangle(color, corners[0], corners[1], corners[2]);
         append_triangle(color, corners[0], corners[2], corners[3]);
+        segments.back().count += 6;
+    }
+    if (new_images) {
+        [impl_->residency commit];
     }
     std::vector<HudGpuVertex> text_verts;
     text_verts.reserve(list->texts.size() * 6);
@@ -866,6 +913,7 @@ bool TerrainRenderer::prepare_hud(const HudList* list, std::string& error) {
             return false;
         }
         slot->hud_color_count = color.size();
+        slot->hud_segments = std::move(segments);
         [impl_->residency addAllocation:slot->hud_color];
     }
     if (!text_verts.empty()) {
@@ -902,8 +950,17 @@ void TerrainRenderer::encode_hud(void* command_buffer, void* target) {
     // minimap chrome strips cannot sit above the terrain thumb.
     if (slot->hud_color_count > 0 && slot->hud_color != nil && impl_->hud_color_pipeline != nil) {
         [impl_->arguments setAddress:slot->hud_color.gpuAddress atIndex:1];
-        [encoder setRenderPipelineState:impl_->hud_color_pipeline];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:slot->hud_color_count];
+        for (const FrameSlot::HudSeg& seg : slot->hud_segments) {
+            if (seg.image == 0) {
+                [encoder setRenderPipelineState:impl_->hud_color_pipeline];
+            } else {
+                const auto at = impl_->hud_images.find(seg.image);
+                if (at == impl_->hud_images.end() || at->second == nil || impl_->hud_image_pipeline == nil) continue;
+                [impl_->arguments setTexture:at->second.gpuResourceID atIndex:0];
+                [encoder setRenderPipelineState:impl_->hud_image_pipeline];
+            }
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:seg.start vertexCount:seg.count];
+        }
     }
     if (slot->hud_minimap_count > 0 && slot->hud_minimap != nil && impl_->hud_text_pipeline != nil &&
         impl_->minimap != nil) {
@@ -1019,6 +1076,11 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
         return false;
     }
     impl_->hud_text_pipeline = make_pipeline(compiler, library, @"hud_vs", @"hud_text_fs", true, &ns_error_obj, true);
+    impl_->hud_image_pipeline = make_pipeline(compiler, library, @"hud_vs", @"hud_image_fs", true, &ns_error_obj, true);
+    if (impl_->hud_image_pipeline == nil) {
+        error = ns_error(ns_error_obj, "hud image pipeline creation failed");
+        return false;
+    }
     if (impl_->hud_text_pipeline == nil) {
         error = ns_error(ns_error_obj, "hud text pipeline creation failed");
         return false;

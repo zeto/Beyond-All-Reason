@@ -175,6 +175,13 @@ fragment float4 hud_color_fs(HudOut in [[stage_in]]) {
     return in.color;
 }
 
+// LuaUI images: premultiplied RGBA tinted by gl.Color (GL modulate).
+fragment float4 hud_image_fs(HudOut in [[stage_in]], texture2d<float> image [[texture(0)]]) {
+    constexpr sampler lin(coord::normalized, address::clamp_to_edge, filter::linear);
+    const float4 c = in.color;
+    return image.sample(lin, in.uv) * float4(c.rgb * c.a, c.a);
+}
+
 fragment float4 hud_text_fs(HudOut in [[stage_in]], texture2d<float> atlas [[texture(0)]], sampler samp [[sampler(0)]]) {
     // Nearest keeps small outlined income glyphs crisp; linear turned them into color blobs.
     constexpr sampler nearest_samp(coord::normalized, address::clamp_to_edge, filter::nearest);

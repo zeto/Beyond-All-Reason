@@ -1872,6 +1872,9 @@ for id, ud in pairs(UnitDefs) do
     if ud.weapons == nil then ud.weapons = {} end
     if ud.modCategories == nil then ud.modCategories = {} end
     if ud.customParams == nil then ud.customParams = {} end
+    -- Recoil UnitDef buildpicname/buildPic: the unit file's buildpic, "" when unset.
+    if ud.buildpicname == nil then ud.buildpicname = "" end
+    if ud.buildPic == nil then ud.buildPic = ud.buildpicname end
     if ud.translatedHumanName == nil then ud.translatedHumanName = ud.name or tostring(id) end
     if ud.translatedTooltip == nil then ud.translatedTooltip = ud.translatedHumanName end
     if ud.iconType == nil then ud.iconType = "default" end
@@ -1992,6 +1995,9 @@ for id, ud in pairs(UnitDefs) do
     if ud.weapons == nil then ud.weapons = {} end
     if ud.modCategories == nil then ud.modCategories = {} end
     if ud.customParams == nil then ud.customParams = {} end
+    -- Recoil UnitDef buildpicname/buildPic: the unit file's buildpic, "" when unset.
+    if ud.buildpicname == nil then ud.buildpicname = "" end
+    if ud.buildPic == nil then ud.buildPic = ud.buildpicname end
   end
 end
 -- luaui/setupdefs.lua runs this before any widget loads.

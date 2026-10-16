@@ -1,6 +1,8 @@
 #include <cstdio>
+#include <cstdlib>
 #include "gl/gl_api.h"
 #include "terrain_renderer.h"
+#include "gl/image_cache.h"
 
 extern "C" {
 #include "lauxlib.h"
@@ -67,6 +69,8 @@ struct Op {
     Kind kind = Kind::Vertex;
     float f[8] = {};
     int i = 0;
+    int img = 0;
+    float st[4] = {};
     std::string s;
     std::string s2;
 };
@@ -91,6 +95,9 @@ struct Corner {
     float g = 1;
     float b = 1;
     float a = 1;
+    float u = 0;
+    float v = 0;
+    int img = 0;
 };
 
 struct Recorder {
@@ -114,6 +121,10 @@ struct Recorder {
     // (DrawRect glow, TexturedRectRound tiles) must not fall back to solid color —
     // that painted barHeight*7 glow slabs as oversized grey rectangles around the top bar.
     bool texture_missing = false;
+    // Bound image file (image_cache id) and current TexCoord.
+    int image = 0;
+    float tu = 0;
+    float tv = 0;
     int recording = 0;
     int next_list = 1;
     int next_tex = 1;
@@ -177,6 +188,9 @@ void push_quad(const Corner& a, const Corner& b, const Corner& c, const Corner& 
         out[i].g = corners[i]->g;
         out[i].b = corners[i]->b;
         out[i].a = corners[i]->a;
+        out[i].u = corners[i]->u;
+        out[i].v = corners[i]->v;
+        out[i].image = corners[i]->img;
     }
     Geo* geo = target_geo();
     for (const HudVertex& vert : out) {
@@ -233,6 +247,9 @@ void replay_texture(int id, float x1, float y1, float x2, float y2, float r, flo
             corners[k].g = vert.g * gch;
             corners[k].b = vert.b * b;
             corners[k].a = vert.a * a;
+            corners[k].u = vert.u;
+            corners[k].v = vert.v;
+            corners[k].img = vert.image;
         }
         push_quad(corners[0], corners[1], corners[2], corners[3]);
     }
@@ -271,6 +288,28 @@ void color_rect(float x1, float y1, float x2, float y2, float r, float gch, floa
         corners[i].a = a;
     }
     push_quad(corners[0], corners[1], corners[2], corners[3]);
+}
+
+// Recoil TexRect corners: (s1,t1)@(x1,y1) (s2,t1)@(x2,y1) (s2,t2)@(x2,y2) (s1,t2)@(x1,y2).
+void image_rect(int img, float x1, float y1, float x2, float y2, const float st[4], float r, float gch, float b,
+                float a) {
+    Corner c[4];
+    const float xs[4] = {x1, x2, x2, x1};
+    const float ys[4] = {y1, y1, y2, y2};
+    const float us[4] = {st[0], st[2], st[2], st[0]};
+    const float vs[4] = {st[1], st[1], st[3], st[3]};
+    for (int i = 0; i < 4; ++i) {
+        c[i].x = xs[i];
+        c[i].y = ys[i];
+        c[i].u = us[i];
+        c[i].v = vs[i];
+        c[i].img = img;
+        c[i].r = r;
+        c[i].g = gch;
+        c[i].b = b;
+        c[i].a = a;
+    }
+    push_quad(c[0], c[1], c[2], c[3]);
 }
 
 void outline_rect(float x1, float y1, float x2, float y2, float r, float gch, float b, float a, float width) {
@@ -347,6 +386,9 @@ void play(const Op& op) {
             corner.g = op.f[4];
             corner.b = op.f[5];
             corner.a = op.f[6];
+            corner.u = op.st[0];
+            corner.v = op.st[1];
+            corner.img = op.img;
             g.batch.push_back(corner);
             if (g.batch.size() == 4) {
                 flush_batch();
@@ -355,7 +397,9 @@ void play(const Op& op) {
         }
         case Kind::TexRect:
             flush_batch();
-            if (op.i > 0) {
+            if (op.img > 0) {
+                image_rect(op.img, op.f[0], op.f[1], op.f[2], op.f[3], op.st, op.f[4], op.f[5], op.f[6], op.f[7]);
+            } else if (op.i > 0) {
                 replay_texture(op.i, op.f[0], op.f[1], op.f[2], op.f[3], op.f[4], op.f[5], op.f[6], op.f[7]);
             }
             // i==0: skip (see note_texrect); do not invent a solid rotating square.
@@ -443,6 +487,9 @@ void note_vertex(float x, float y, float z) {
         op.f[4] = g.cg;
         op.f[5] = g.cb;
         op.f[6] = g.ca;
+        op.img = g.image;
+        op.st[0] = g.tu;
+        op.st[1] = g.tv;
         add_op(std::move(op));
         return;
     }
@@ -450,6 +497,9 @@ void note_vertex(float x, float y, float z) {
     corner.x = x;
     corner.y = y;
     corner.z = z;
+    corner.u = g.tu;
+    corner.v = g.tv;
+    corner.img = g.image;
     corner.r = g.cr;
     corner.g = g.cg;
     corner.b = g.cb;
@@ -460,7 +510,7 @@ void note_vertex(float x, float y, float z) {
     }
 }
 
-void note_texrect(float x1, float y1, float x2, float y2) {
+void note_texrect(float x1, float y1, float x2, float y2, const float st[4]) {
     if (g.texture_missing) {
         return;
     }
@@ -476,7 +526,13 @@ void note_texrect(float x1, float y1, float x2, float y2) {
         op.f[6] = g.cb;
         op.f[7] = g.ca;
         op.i = g.bind;
+        op.img = g.image;
+        for (int k = 0; k < 4; ++k) op.st[k] = st[k];
         add_op(std::move(op));
+        return;
+    }
+    if (g.image > 0) {
+        image_rect(g.image, x1, y1, x2, y2, st, g.cr, g.cg, g.cb, g.ca);
         return;
     }
     if (g.bind > 0) {
@@ -585,7 +641,56 @@ int gl_color(lua_State* state) {
     return 0;
 }
 
+// "#<unitDefID>" is the unit buildpic: Recoil loads unitpics/<buildpic>, else <name>.dds/.png.
+std::string buildpic_name(lua_State* state, int def_id) {
+    std::string out;
+    lua_getglobal(state, "UnitDefs");
+    if (lua_istable(state, -1)) {
+        lua_rawgeti(state, -1, def_id);
+        if (lua_istable(state, -1)) {
+            lua_getfield(state, -1, "buildpicname");
+            if (lua_isstring(state, -1)) out = lua_tostring(state, -1);
+            lua_pop(state, 1);
+            if (out.empty()) {
+                lua_getfield(state, -1, "name");
+                if (lua_isstring(state, -1)) out = lua_tostring(state, -1);
+                lua_pop(state, 1);
+            }
+        }
+        lua_pop(state, 1);
+    }
+    lua_pop(state, 1);
+    return out;
+}
+
 int gl_texture(lua_State* state) {
+    // Texture(slot, name) form: the name is the last argument.
+    const int arg = (lua_gettop(state) >= 2 && lua_isnumber(state, 1) != 0 && lua_isstring(state, 2) != 0 &&
+                     lua_isnumber(state, 2) == 0) ? 2 : 1;
+    if (lua_isstring(state, arg) != 0 && lua_isnumber(state, arg) == 0) {
+        const std::string name = lua_tostring(state, arg);
+        int img = 0;
+        if (!name.empty() && name[0] == '#') {
+            const int def_id = std::atoi(name.c_str() + 1);
+            const std::string pic = buildpic_name(state, def_id);
+            if (!pic.empty()) {
+                if (pic.find('.') != std::string::npos) {
+                    img = image_acquire("unitpics/" + pic);
+                } else {
+                    img = image_acquire("unitpics/" + pic + ".dds");
+                    if (img == 0) img = image_acquire("unitpics/" + pic + ".png");
+                }
+            }
+        } else {
+            img = image_acquire(name);
+        }
+        g.bind = 0;
+        g.image = img;
+        g.texture_missing = img == 0;
+        lua_pushboolean(state, img != 0);
+        return 1;
+    }
+    g.image = 0;
     if (lua_isnumber(state, 1) != 0) {
         g.bind = static_cast<int>(lua_tonumber(state, 1));
         g.texture_missing = false;
@@ -602,8 +707,32 @@ int gl_texture(lua_State* state) {
     return 0;
 }
 
+// gl.TextureInfo(name) -> {xsize, ysize} for a loadable image, nil otherwise.
+int gl_texture_info(lua_State* state) {
+    if (lua_isstring(state, 1) == 0) return 0;
+    const std::string name = lua_tostring(state, 1);
+    if (!name.empty() && name[0] == '#') return 0;
+    const int img = image_acquire(name);
+    const auto decoded = image_get(img);
+    if (!decoded) return 0;
+    lua_newtable(state);
+    lua_pushnumber(state, decoded->width);
+    lua_setfield(state, -2, "xsize");
+    lua_pushnumber(state, decoded->height);
+    lua_setfield(state, -2, "ysize");
+    return 1;
+}
+
 int gl_texrect(lua_State* state) {
-    note_texrect(lua_num(state, 1, 0), lua_num(state, 2, 0), lua_num(state, 3, 0), lua_num(state, 4, 0));
+    const int args = lua_gettop(state);
+    float st[4] = {0.f, 1.f, 1.f, 0.f};
+    if (args <= 6) {
+        if (args >= 5 && lua_toboolean(state, 5) != 0) { st[0] = 1.f; st[2] = 0.f; }
+        if (args >= 6 && lua_toboolean(state, 6) != 0) { st[1] = 0.f; st[3] = 1.f; }
+    } else {
+        for (int k = 0; k < 4; ++k) st[k] = lua_num(state, 5 + k, 0);
+    }
+    note_texrect(lua_num(state, 1, 0), lua_num(state, 2, 0), lua_num(state, 3, 0), lua_num(state, 4, 0), st);
     return 0;
 }
 
@@ -613,7 +742,13 @@ int gl_vertex(lua_State* state) {
 }
 
 int gl_texcoord(lua_State* state) {
-    (void)state;
+    if (lua_istable(state, 1)) {
+        lua_rawgeti(state, 1, 1); g.tu = static_cast<float>(lua_tonumber(state, -1)); lua_pop(state, 1);
+        lua_rawgeti(state, 1, 2); g.tv = static_cast<float>(lua_tonumber(state, -1)); lua_pop(state, 1);
+        return 0;
+    }
+    g.tu = lua_num(state, 1, 0);
+    g.tv = lua_num(state, 2, 0);
     return 0;
 }
 
@@ -652,6 +787,7 @@ int gl_create_list(lua_State* state) {
     // CreateList may end after Texture(":path:") without Texture(false); do not leak
     // texture_missing into later lists (would drop solid RectRound bar fills).
     g.texture_missing = false;
+    g.image = 0;
     if (rc != 0) {
         return lua_error(state);
     }
@@ -1189,6 +1325,7 @@ void gl_install(lua_State* state) {
     set_gl(state, "LineStipple", gl_line_stipple);
     set_gl(state, "Vertex", gl_vertex);
     set_gl(state, "TexCoord", gl_texcoord);
+    set_gl(state, "TextureInfo", gl_texture_info);
     set_gl(state, "BeginEnd", gl_begin_end);
     set_gl(state, "CreateList", gl_create_list);
     set_gl(state, "CallList", gl_call_list);
@@ -1245,6 +1382,12 @@ void gl_install(lua_State* state) {
 
 void gl_set_root(const std::string& game_root) {
     g.root = game_root;
+    // Art comes from the stock tree first, then the BAR content dir. Both read-only.
+    std::vector<std::string> roots{game_root};
+    if (const char* home = std::getenv("HOME")) {
+        roots.push_back(std::string(home) + "/Library/Application Support/Beyond-All-Reason-mac");
+    }
+    image_set_roots(roots);
 }
 
 void gl_set_view(int width, int height) {
@@ -1279,6 +1422,7 @@ void gl_begin_draw() {
     g.ca = 1;
     g.bind = 0;
     g.texture_missing = false;
+    g.image = 0;
     g.recording = 0;
     g.scissor_on = false;
     g.batch.clear();
