@@ -43,6 +43,7 @@ add_executable(bar-metal
   map/startscript.cpp
   map/camera.cpp
   map/smf.cpp
+  map/smf_textures.cpp
   map/bookmarks.cpp
   vfs/pool.cpp
   defs/unitdef.cpp
