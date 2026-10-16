@@ -50,9 +50,14 @@ void append_placed(ModelMesh& dst, const ModelMesh& src) {
     if (dst.color_bc3.empty()) {
         dst.color_bc3 = src.color_bc3;
         dst.other_bc3 = src.other_bc3;
+        dst.color_mips = src.color_mips;
+        dst.other_mips = src.other_mips;
         dst.tex_size = src.tex_size;
         dst.normal_bc3 = src.normal_bc3;
+        dst.normal_mips = src.normal_mips;
         dst.normal_size = src.normal_size;
+        dst.s3o_radius = src.s3o_radius;
+        dst.s3o_height = src.s3o_height;
     }
     if (dst.pieces.empty()) {
         dst.pieces = src.pieces;
@@ -101,6 +106,7 @@ bool spawn_commanders(const std::string& game_root, const std::string& data_dir,
         std::string normal_error;
         if (!normal_path.empty() && !load_model_normal(content, normal_path, loaded, normal_error)) {
             loaded.normal_bc3.clear();
+            loaded.normal_mips.clear();
             loaded.normal_size = 0;
         }
         if (!model.color_bc3.empty() && loaded.tex_size != model.tex_size) {

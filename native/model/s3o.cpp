@@ -222,7 +222,8 @@ bool piece_chain_matches(const ModelMesh& mesh, std::string& error) {
     return true;
 }
 
-bool extract_bc3(const std::vector<uint8_t>& dds, std::vector<uint8_t>& mip0, int& size, std::string& error) {
+bool extract_bc3(const std::vector<uint8_t>& dds, std::vector<uint8_t>& mip0, std::vector<std::vector<uint8_t>>& mips,
+                 int& size, std::string& error) {
     if (dds.size() < 128 || std::memcmp(dds.data(), "DDS ", 4) != 0) {
         error = "unit texture is not a DDS file";
         return false;
@@ -240,17 +241,33 @@ bool extract_bc3(const std::vector<uint8_t>& dds, std::vector<uint8_t>& mip0, in
     }
     mip0.assign(dds.begin() + 128, dds.begin() + 128 + static_cast<std::ptrdiff_t>(bytes));
     size = width;
+    // DDSD_MIPMAPCOUNT (0x20000) in dwFlags: dwMipMapCount levels follow mip 0, down to 4x4 blocks here.
+    mips.clear();
+    const uint32_t flags = static_cast<uint32_t>(read_i32(dds.data() + 8));
+    const int count = (flags & 0x20000u) ? read_i32(dds.data() + 28) : 1;
+    size_t offset = 128 + bytes;
+    int dim = width / 2;
+    for (int level = 1; level < count && dim >= 4; ++level, dim /= 2) {
+        const size_t level_bytes = static_cast<size_t>(dim / 4) * static_cast<size_t>(dim / 4) * 16;
+        if (dds.size() < offset + level_bytes) {
+            break;
+        }
+        mips.emplace_back(dds.begin() + static_cast<std::ptrdiff_t>(offset),
+                          dds.begin() + static_cast<std::ptrdiff_t>(offset + level_bytes));
+        offset += level_bytes;
+    }
     return true;
 }
 
-bool read_texture(const GameContent& content, const std::string& name, std::vector<uint8_t>& mip0, int& size,
+bool read_texture(const GameContent& content, const std::string& name, std::vector<uint8_t>& mip0,
+                  std::vector<std::vector<uint8_t>>& mips, int& size,
                   std::string& error) {
     const std::string path = "unittextures/" + lower_copy(name);
     std::vector<uint8_t> dds;
     if (!content.read(path, dds, error)) {
         return false;
     }
-    return extract_bc3(dds, mip0, size, error);
+    return extract_bc3(dds, mip0, mips, size, error);
 }
 
 }  // namespace
@@ -284,6 +301,12 @@ bool load_s3o(const GameContent& content, const std::string& object_name, ModelM
     }
     const int root = read_i32(file.data() + 36);
     mesh = ModelMesh{};
+    {
+        float header[2];
+        std::memcpy(header, file.data() + 16, sizeof(header));
+        mesh.s3o_radius = header[0];
+        mesh.s3o_height = header[1];
+    }
     if (!emit_piece(file, root, -1, 0, 0, 0, mesh, error) || !piece_chain_matches(mesh, error)) {
         return false;
     }
@@ -321,8 +344,8 @@ bool load_s3o(const GameContent& content, const std::string& object_name, ModelM
     const std::string tex2 = cstr_at(file, read_i32(file.data() + 48));
     int color_size = 0;
     int other_size = 0;
-    if (!read_texture(content, tex1, mesh.color_bc3, color_size, error) ||
-        !read_texture(content, tex2, mesh.other_bc3, other_size, error)) {
+    if (!read_texture(content, tex1, mesh.color_bc3, mesh.color_mips, color_size, error) ||
+        !read_texture(content, tex2, mesh.other_bc3, mesh.other_mips, other_size, error)) {
         return false;
     }
     if (color_size != other_size) {
@@ -338,7 +361,7 @@ bool load_model_normal(const GameContent& content, const std::string& path, Mode
     if (!content.read(lower_copy(path), dds, error) && !content.read(path, dds, error)) {
         return false;
     }
-    return extract_bc3(dds, mesh.normal_bc3, mesh.normal_size, error);
+    return extract_bc3(dds, mesh.normal_bc3, mesh.normal_mips, mesh.normal_size, error);
 }
 
 }  // namespace bar

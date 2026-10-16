@@ -39,6 +39,9 @@ public:
     void set_pieces(const float* column_major, int count);
     // World-space radius of the team-colored ground ring. 0 hides it.
     void set_marker(float radius);
+    // gui_selectedunits_gl4 platter (radius 0 hides it) at the unit origin, and the CUS
+    // selection rim highlight on the model while selected.
+    void set_platter(float radius, bool selected);
     // Cyan mex rings. On for an interactive window. Off for screenshot checks.
     void set_metal_hud(bool enabled);
     void attach(void* metal_layer);

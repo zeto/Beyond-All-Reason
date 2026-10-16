@@ -28,10 +28,17 @@ struct ModelMesh {
     std::vector<ModelPiece> pieces;
     std::vector<uint8_t> color_bc3;
     std::vector<uint8_t> other_bc3;
+    // DDS mip levels 1..n as stored (Recoil samples unit textures with their mip chain).
+    std::vector<std::vector<uint8_t>> color_mips;
+    std::vector<std::vector<uint8_t>> other_mips;
     int tex_size = 0;
     // CUS normalTex (unitDef customParams.normaltex, else unittextures/blank_normal.dds), BC3 mip 0.
     std::vector<uint8_t> normal_bc3;
+    std::vector<std::vector<uint8_t>> normal_mips;
     int normal_size = 0;
+    // S3O header radius and height (UnitDef radius / height for s3o models).
+    float s3o_radius = 0;
+    float s3o_height = 0;
 };
 
 // Piece-local vertices. pad0 is the piece index. Medals and the crown keep their nodes and drop their

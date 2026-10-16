@@ -49,6 +49,7 @@ struct Uniforms {
     float4 grass_b;
     float4 grass_c;
     float4 grass_u;
+    float4 platter;
 };
 
 // Recoil CGlobalRendering::SMF_INTENSITY_MULT.
@@ -340,6 +341,8 @@ fragment float4 model_fs(Varying in [[stage_in]],
                          texturecube<float> reflect_tex [[texture(11)]],
                          sampler samp [[sampler(0)]]) {
     constexpr sampler lut_s(coord::normalized, filter::linear, address::clamp_to_edge);
+    // Unit textures carry their DDS mip chain (trilinear, as GL samples a mipmapped texture).
+    constexpr sampler unit_s(coord::normalized, filter::linear, mip_filter::linear, address::repeat);
     float3 world = float3(in.world_xz.x, in.world_y, in.world_xz.y);
     // Recoil loads unit DDS through nv_dds with a vertical flip and samples raw s3o uv; the
     // BC3 mips here are uploaded unflipped, so the same texel sits at (u, 1 - v).
@@ -357,12 +360,12 @@ fragment float4 model_fs(Varying in [[stage_in]],
     float3 bitangent = normalize(cross(worldNormal, tangent));
     float3 tbnNormal = float3(0.0, 0.0, 1.0);
     if (uniforms.unit_frame.z > 0.5) {
-        tbnNormal = normalize(normal_tex.sample(samp, tex_uv).xyz * 2.0 - 1.0);
+        tbnNormal = normalize(normal_tex.sample(unit_s, tex_uv).xyz * 2.0 - 1.0);
     }
     float3 N = normalize(float3x3(tangent, bitangent, worldNormal) * tbnNormal);
 
-    float4 texColor1 = color_tex.sample(samp, tex_uv);
-    float4 texColor2 = other_tex.sample(samp, tex_uv);
+    float4 texColor1 = color_tex.sample(unit_s, tex_uv);
+    float4 texColor2 = other_tex.sample(unit_s, tex_uv);
     float3 albedo = mix(texColor1.rgb, uniforms.team_color.rgb, texColor1.a);
     float ao = in.unit_terms.x;
     float emissiveness = saturate(in.unit_terms.y * texColor2.r);
@@ -441,6 +444,12 @@ fragment float4 model_fs(Varying in [[stage_in]],
     outColor *= CUS_PBR_PARAMS[7];
     outColor = cus_tonemap(outColor);
     outColor *= CUS_BRIGHTNESS_FACTOR;
+    // CUS SELECTION EFFECTS (selectedness 1, set by gui_selectedunits_gl4): rim on the
+    // interpolated vertex normal, tinted by the team colour clamped to [0.65, 1].
+    if (uniforms.platter.y > 0.5) {
+        float rim = saturate(1.0 - dot(worldNormal, V));
+        outColor += rim * rim * clamp(uniforms.team_color.rgb, 0.65, 1.0);
+    }
     return float4(outColor, 1.0);
 }
 
@@ -694,6 +703,55 @@ fragment float4 grass_fs(GrassOut in [[stage_in]],
     color.a = clamp((color.a - 0.5) * 1.5 + 0.5, 0.0, 1.0);
     if (color.a < u.grass_a.z) discard_fragment();
     return color;
+}
+
+// gui_selectedunits_gl4 platter through DrawPrimitiveAtUnit (USE_CIRCLES, 64 vertices,
+// HEIGHTOFFSET 4, ZPULL 256). Vertices 0..191 are the fill fan; 192..575 the outline band
+// from the fill edge out to the addRadius 1.3 polygon (the stencil leaves only that band).
+struct PlatterOut {
+    float4 position [[position]];
+    float4 color;
+};
+
+vertex PlatterOut platter_vs(uint vid [[vertex_id]], constant Uniforms& u [[buffer(0)]]) {
+    const uint sides = 64;
+    // addRadiusCorr = 1 / sin(internalAngle / 2), internalAngle = (n - 2) * pi / n.
+    const float corr = 1.0 / sin(float(sides - 2) * M_PI_F / float(sides) * 0.5);
+    const float radius = u.platter.x * u.platter.z;
+    const float outer = radius + 1.3 * corr;
+    bool outline = vid >= sides * 3;
+    float r = radius;
+    uint edge = 0;
+    bool center = false;
+    if (!outline) {
+        uint tri = vid / 3;
+        uint corner = vid % 3;
+        center = corner == 0;
+        edge = tri + (corner == 2 ? 1 : 0);
+    } else {
+        uint local = vid - sides * 3;
+        uint quad = local / 6;
+        const uint pick[6] = {0, 1, 2, 2, 1, 3};
+        uint corner = pick[local % 6];
+        edge = quad + (corner & 1);
+        r = (corner & 2) ? outer : radius;
+    }
+    // The strip's vertices start at -x and step pi / 32 round the circle.
+    float phi = float(edge % sides) * (2.0 * M_PI_F / float(sides)) - M_PI_F * 0.5;
+    float2 offset = center ? float2(0.0) : float2(sin(phi), cos(phi)) * r;
+    float3 world = float3(u.model_pose.x + offset.x, u.model_pose.y + 4.0, u.model_pose.z + offset.y);
+    PlatterOut out;
+    out.position = u.view_proj * float4(world, 1.0);
+    // ZPULL: GL pulls clip z by 256 / w over a [-1, 1] depth range; half that over Metal's [0, 1].
+    out.position.z -= 128.0 / out.position.w;
+    // POST_SHADING: mix(teamColor + addRadius, 1, 1 - 0.6), alpha 0.19 + addRadius (clamped).
+    float add = outline ? 1.3 : 0.0;
+    out.color = saturate(float4(mix(u.team_color.rgb + add, float3(1.0), 0.4), 0.19 + add));
+    return out;
+}
+
+fragment float4 platter_fs(PlatterOut in [[stage_in]]) {
+    return in.color;
 }
 
 // Free mex ring. gui_metalspots uses rgb (0, 1, 0.5) and fades the ring near alpha 0.5.

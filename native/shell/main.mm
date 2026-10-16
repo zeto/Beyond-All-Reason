@@ -479,6 +479,15 @@ int run_terrain(const Options& options, const std::string& game_name) {
         }
         std::cout << "model: " << model.vertices.size() << " verts, " << model.indices.size() << " indices, tex "
                   << model.tex_size << "\n";
+        {
+            bar::UnitBuild cost;
+            std::string cost_error;
+            if (bar::load_unit_build(options.game_root, lead.def_name, cost, cost_error)) {
+                // UnitDef power: metal cost plus energy cost / 60.
+                bar::hud_status_set_unit(model.s3o_height, model.s3o_radius,
+                                         cost.metal_cost + cost.energy_cost / 60.f, cost.health);
+            }
+        }
         for (const bar::UnitSpawn& unit : units) {
             std::cout << "spawn team " << unit.team << " " << unit.def_name << " at " << unit.x << " " << unit.y
                       << " " << unit.z << "\n";
@@ -759,34 +768,37 @@ int run_terrain(const Options& options, const std::string& game_name) {
     bar::selection_reset();
     bar::checklist_reset();
     bar::build_cmd_reset();
+    // gui_selectedunits_gl4 unitScale: 7.5 * sqrt(xsize^2 + zsize^2) + 8 (xsize = 2 * footprintx),
+    // x0.7 for aircraft; the circle platter is that wide, so its radius is half of it.
+    float platter_radius = 0.f;
+    if (!sim.def_name.empty()) {
+        bar::UnitRole role;
+        std::string role_error;
+        if (bar::load_unit_role(options.game_root, sim.def_name[0], role, role_error) && role.footprint_x > 0) {
+            const float xs = 2.f * static_cast<float>(role.footprint_x);
+            const float zs = 2.f * static_cast<float>(role.footprint_z);
+            float scale = 7.5f * std::sqrt(xs * xs + zs * zs) + 8.f;
+            if (role.can_fly) {
+                scale *= 0.7f;
+            }
+            platter_radius = scale * 0.5f;
+        }
+    }
     auto place_model = [&](float distance) {
+        (void)distance;
+        renderer.set_marker(0);
         if (sim.x.empty()) {
-            renderer.set_marker(0);
+            renderer.set_platter(0, false);
             return;
         }
         const float bank = sim.bank.empty() ? 0.f : sim.bank[0];
         renderer.set_pose(sim.x[0], sim.y[0], sim.z[0], sim.heading[0], bank);
         upload_pieces();
-        // 28 elmos sits outside the commander. Past ~2300 elmos the ring grows so it stays
-        // about 30 pixels across instead of shrinking to a speck.
-        // A locked capture hides the ring so team-colored pixels belong to the unit.
-        if (options.lock_camera) {
-            renderer.set_marker(0);
-            return;
-        }
-        // Ground ring only while the commander is selected; depth-tested with terrain
-        // so the unit mesh occludes it. Radius tracks camera distance for ~30px screen size.
+        const bar::SelectionSnapshot& snap = bar::selection_snapshot();
         const bool selected =
-            !bar::selection_snapshot().selected.empty() &&
-            (sim.id.empty() ||
-             std::find(bar::selection_snapshot().selected.begin(), bar::selection_snapshot().selected.end(),
-                       sim.id[0]) != bar::selection_snapshot().selected.end());
-        if (!selected) {
-            renderer.set_marker(0);
-            return;
-        }
-        const float grown = distance * 0.012f;
-        renderer.set_marker(grown > 28.f ? grown : 28.f);
+            !snap.selected.empty() &&
+            (sim.id.empty() || std::find(snap.selected.begin(), snap.selected.end(), sim.id[0]) != snap.selected.end());
+        renderer.set_platter(selected ? platter_radius : 0.f, selected);
     };
     place_model(720.f);
     if (!options.trace.empty()) {

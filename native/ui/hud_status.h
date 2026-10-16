@@ -21,6 +21,8 @@ struct HudStatusEvent {
 void hud_status_reset();
 
 void hud_status_set_root(const std::string& game_root);
+// gui_healthbars_gl4 inputs for unit 0: UnitDef height and radius, power and max health.
+void hud_status_set_unit(float height, float radius, float power, float max_health);
 
 void hud_status_set_camera(const Camera* camera, const CameraPose* pose);
 

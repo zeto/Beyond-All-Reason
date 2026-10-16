@@ -28,6 +28,8 @@ float g_bar_fill_right = 0;
 float g_bar_bottom = 0;
 float g_bar_top = 0;
 float g_bar_frac = 0;
+float g_unit_height = 0;
+float g_unit_size = 1;
 std::vector<std::pair<float, float>> g_ring_samples;
 
 float unit_range(const std::string& def_name) {
@@ -124,6 +126,13 @@ void hud_status_set_camera(const Camera* camera, const CameraPose* pose) {
     g_pose = pose;
 }
 
+void hud_status_set_unit(float height, float radius, float power, float max_health) {
+    g_unit_height = height;
+    // unitDefSizeMultipliers: min(1.45, max(0.85, radius / 150 + min(0.6, power / 4000))) + min(0.6, health / 22000).
+    g_unit_size = std::min(1.45f, std::max(0.85f, radius / 150.f + std::min(0.6f, power / 4000.f))) +
+                  std::min(0.6f, max_health / 22000.f);
+}
+
 void hud_status_set_root(const std::string& game_root) {
     g_game_root = game_root;
 }
@@ -191,18 +200,40 @@ void hud_status_append(HudList& hud, const UnitSim& sim, const TerrainMesh& terr
     if (g_camera == nullptr || g_pose == nullptr || sim.id.empty()) {
         return;
     }
+    // gui_healthbars_gl4: a camera-facing bar at drawPos + HEIGHTOFFSET 3 + height + 24 * size,
+    // 2 * BARWIDTH 2.56 by BARHEIGHT 0.9 times BARSCALE 4 * size elmos; percentage bars hide above 0.999.
+    const float size = g_unit_size;
+    const float anchor_y = sim.y[0] + 3.f + g_unit_height + 24.f * size;
     float sx = 0;
     float sy = 0;
-    if (!world_to_screen(*g_camera, *g_pose, sim.x[0], sim.y[0] + 35.f, sim.z[0], sx, sy)) {
+    if (!world_to_screen(*g_camera, *g_pose, sim.x[0], anchor_y, sim.z[0], sx, sy)) {
         return;
+    }
+    // A camera-right vector is horizontal: its pixel length per elmo is the x reach of world x and z.
+    float ax = 0, ay = 0, bx = 0, by = 0;
+    float px_per_elmo = 0.f;
+    if (world_to_screen(*g_camera, *g_pose, sim.x[0] + 1.f, anchor_y, sim.z[0], ax, ay) &&
+        world_to_screen(*g_camera, *g_pose, sim.x[0], anchor_y, sim.z[0] + 1.f, bx, by)) {
+        px_per_elmo = std::sqrt((ax - sx) * (ax - sx) + (bx - sx) * (bx - sx));
     }
     const float hp = (0 < sim.health.size()) ? sim.health[0] : 0.f;
     const float hp_max = (0 < sim.max_health.size()) ? sim.max_health[0] : 1.f;
     const float frac = hp_max > 0.f ? std::max(0.f, std::min(1.f, hp / hp_max)) : 0.f;
     // Health bar: readable size above the unit, dark track + green fill at health/maxHealth.
-    const float bar_w = 80.f;
-    const float bar_h = 9.f;
-    const float bar_y = sy + 22.f;
+    const float bar_w = 2.f * 2.56f * 4.f * size * px_per_elmo;
+    const float bar_h = 0.9f * 4.f * size * px_per_elmo;
+    const float bar_y = sy - bar_h * 0.5f;
+    if (frac > 0.999f || !(bar_w > 1.f)) {
+        float range = unit_range(sim.def_name[0]);
+        if (range > 0.f) {
+            push_world_range_ring(hud, sim, terrain, range);
+            g_range = range;
+        }
+        g_health = hp;
+        g_max_health = hp_max;
+        g_bar_frac = frac;
+        return;
+    }
     const float left = sx - bar_w * 0.5f;
     const float right = sx + bar_w * 0.5f;
     const float fill_right = left + bar_w * frac;
@@ -210,7 +241,11 @@ void hud_status_append(HudList& hud, const UnitSim& sim, const TerrainMesh& terr
     push_bar(hud, left - 1.f, bar_y - 1.f, right + 1.f, bar_y + bar_h + 1.f, 0.f, 0.f, 0.f, 0.9f);
     push_bar(hud, left, bar_y, right, bar_y + bar_h, 0.12f, 0.12f, 0.12f, 0.92f);
     if (frac > 0.01f) {
-        push_bar(hud, left, bar_y, fill_right, bar_y + bar_h, 0.2f, 0.85f, 0.25f, 0.98f);
+        // health bar type: mix(mincolor red, maxcolor green, health), BITCOLORCORRECT divides by max(r, g).
+        const float cr = 1.f - frac;
+        const float cg = frac;
+        const float cm = std::max(cr, cg);
+        push_bar(hud, left, bar_y, fill_right, bar_y + bar_h, cr / cm, cg / cm, 0.f, 1.f);
     }
     g_bar_left = left;
     g_bar_right = right;

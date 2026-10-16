@@ -107,6 +107,8 @@ struct TerrainUniforms {
     float grass_c[4];
     // grassuniforms: wind offset x, wind offset z, wind strength, global alpha.
     float grass_u[4];
+    // x radius (0 hides), y 1 while the unit is selected, z breathe factor.
+    float platter[4];
 };
 
 // terrain_fs texture slots. Slot 2 is the shadow map.
@@ -133,6 +135,7 @@ struct TerrainRenderer::Impl {
     id<MTLRenderPipelineState> model_pipeline = nil;
     id<MTLRenderPipelineState> water_pipeline = nil;
     id<MTLRenderPipelineState> ring_pipeline = nil;
+    id<MTLRenderPipelineState> platter_pipeline = nil;
     id<MTLRenderPipelineState> hud_color_pipeline = nil;
     id<MTLRenderPipelineState> hud_text_pipeline = nil;
     id<MTLRenderPipelineState> hud_image_pipeline = nil;
@@ -217,6 +220,8 @@ struct TerrainRenderer::Impl {
     float team_color[3] = {0, 0, 0};
     float model_pose[4] = {0, 0, 0, 0};
     float marker_radius = 0;
+    float platter_radius = 0;
+    bool platter_selected = false;
     float bank = 0;
     bool metal_hud = false;
     std::vector<float> piece_cpu;
@@ -451,6 +456,8 @@ struct SceneBindings {
     id<MTLRenderPipelineState> model_pipeline;
     id<MTLRenderPipelineState> water_pipeline;
     id<MTLRenderPipelineState> ring_pipeline;
+    id<MTLRenderPipelineState> platter_pipeline;
+    bool platter = false;
     id<MTLDepthStencilState> terrain_depth;
     id<MTLDepthStencilState> water_depth;
     id<MTLTexture> minimap;
@@ -908,6 +915,14 @@ void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, i
         }
         [encoder setCullMode:MTLCullModeNone];
         [encoder setFrontFacingWinding:MTLWindingClockwise];
+    }
+
+    // gui_selectedunits_gl4 DrawWorldPreUnit: fill (alpha 0.19), then the 1.3-elmo outline
+    // where no fill was drawn. Depth tested, no depth writes, no culling.
+    if (scene.platter && scene.platter_pipeline != nil) {
+        [encoder setRenderPipelineState:scene.platter_pipeline];
+        [encoder setDepthStencilState:scene.water_depth];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:64 * 3 + 64 * 6];
     }
 
     if (model_drawable(scene)) {
@@ -1834,6 +1849,11 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
         [impl_->residency addAllocation:impl_->shadow_map];
     }
     impl_->ring_pipeline = make_pipeline(compiler, library, @"terrain_vs", @"ring_fs", true, &ns_error_obj);
+    impl_->platter_pipeline = make_pipeline(compiler, library, @"platter_vs", @"platter_fs", true, &ns_error_obj);
+    if (impl_->platter_pipeline == nil) {
+        error = ns_error(ns_error_obj, "selection platter pipeline creation failed");
+        return false;
+    }
     impl_->sky_pipeline = make_pipeline(compiler, library, @"sky_vs", @"sky_fs", false, &ns_error_obj);
     if (impl_->sky_pipeline == nil) {
         error = ns_error(ns_error_obj, "sky pipeline creation failed");
@@ -2265,25 +2285,25 @@ bool TerrainRenderer::set_model(const ModelMesh& model, float color_r, float col
 
     impl_->model_vertices = upload(impl_->device, model.vertices.data(), model.vertices.size() * sizeof(TerrainVertex));
     impl_->model_indices = upload(impl_->device, model.indices.data(), model.indices.size() * sizeof(uint32_t));
-    MTLTextureDescriptor* desc =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBC3_RGBA
-                                                           width:static_cast<NSUInteger>(model.tex_size)
-                                                          height:static_cast<NSUInteger>(model.tex_size)
-                                                       mipmapped:NO];
-    desc.usage = MTLTextureUsageShaderRead;
-    desc.storageMode = MTLStorageModeShared;
-    impl_->model_color = [impl_->device newTextureWithDescriptor:desc];
-    impl_->model_other = [impl_->device newTextureWithDescriptor:desc];
+    // The DDS mip chains go up as stored so model_fs can sample them with mip filtering.
+    auto bc3_image = [](int size, const std::vector<uint8_t>& mip0, const std::vector<std::vector<uint8_t>>& mips) {
+        GpuImage image;
+        image.format = GpuImage::Format::BC3;
+        image.width = size;
+        image.height = size;
+        image.levels.push_back(mip0);
+        for (const auto& level : mips) {
+            image.levels.push_back(level);
+        }
+        return image;
+    };
+    impl_->model_color = upload_image(impl_->device, bc3_image(model.tex_size, model.color_bc3, model.color_mips));
+    impl_->model_other = upload_image(impl_->device, bc3_image(model.tex_size, model.other_bc3, model.other_mips));
     if (impl_->model_vertices == nil || impl_->model_indices == nil || impl_->model_color == nil ||
         impl_->model_other == nil) {
         error = "commander buffer or BC3 texture allocation failed";
         return false;
     }
-    const NSUInteger row_bytes = static_cast<NSUInteger>(model.tex_size / 4) * 16;
-    const MTLRegion region = MTLRegionMake2D(0, 0, static_cast<NSUInteger>(model.tex_size),
-                                              static_cast<NSUInteger>(model.tex_size));
-    [impl_->model_color replaceRegion:region mipmapLevel:0 withBytes:model.color_bc3.data() bytesPerRow:row_bytes];
-    [impl_->model_other replaceRegion:region mipmapLevel:0 withBytes:model.other_bc3.data() bytesPerRow:row_bytes];
 
     [impl_->residency addAllocation:impl_->model_vertices];
     [impl_->residency addAllocation:impl_->model_indices];
@@ -2296,6 +2316,9 @@ bool TerrainRenderer::set_model(const ModelMesh& model, float color_r, float col
         normal.width = model.normal_size;
         normal.height = model.normal_size;
         normal.levels.push_back(model.normal_bc3);
+        for (const auto& level : model.normal_mips) {
+            normal.levels.push_back(level);
+        }
         impl_->model_normal = upload_image(impl_->device, normal);
         if (impl_->model_normal != nil) {
             [impl_->residency addAllocation:impl_->model_normal];
@@ -2323,6 +2346,11 @@ void TerrainRenderer::set_pose(float x, float y, float z, float heading, float b
     impl_->model_pose[2] = z;
     impl_->model_pose[3] = heading;
     impl_->bank = bank;
+}
+
+void TerrainRenderer::set_platter(float radius, bool selected) {
+    impl_->platter_radius = radius > 0.f ? radius : 0.f;
+    impl_->platter_selected = selected;
 }
 
 void TerrainRenderer::set_marker(float radius) {
@@ -2413,6 +2441,11 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     uniforms.model_pose[3] = impl_->model_pose[3];
     uniforms.marker[0] = impl_->marker_radius;
     uniforms.marker[1] = impl_->bank;
+    uniforms.platter[0] = impl_->platter_radius;
+    uniforms.platter[1] = impl_->platter_selected ? 1.f : 0.f;
+    // DrawPrimitiveAtUnit ANIMATION: clamp(grow, INITIALSIZE, 1) + sin(frame / BREATHERATE 30) * BREATHESIZE 0.05.
+    uniforms.platter[2] = 1.f + std::sin(static_cast<float>(frame.sim_frame) / 30.f) * 0.05f;
+    uniforms.platter[3] = 0.f;
     const bool shadows = impl_->shadow_map != nil &&
                          fit_shadow(frame.view_proj, impl_->sun, impl_->height_min, impl_->height_max, uniforms.shadow_vp);
     uniforms.shadow[0] = impl_->ground_shadow_density;
@@ -2647,6 +2680,8 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     scene.model_pipeline = impl_->model_pipeline;
     scene.water_pipeline = impl_->water_pipeline;
     scene.ring_pipeline = impl_->ring_pipeline;
+    scene.platter_pipeline = impl_->platter_pipeline;
+    scene.platter = impl_->platter_radius > 0.f;
     scene.terrain_depth = impl_->terrain_depth;
     scene.water_depth = impl_->water_depth;
     scene.minimap = impl_->minimap;

@@ -293,12 +293,7 @@ bool selection_get_box(float& x1, float& y1, float& x2, float& y2) {
 }
 
 void selection_append_highlights(HudList& hud) {
-    for (const SelectionMark& mark : g_marks) {
-        if (std::find(g_snap.selected.begin(), g_snap.selected.end(), mark.unit_id) == g_snap.selected.end()) {
-            continue;
-        }
-        push_ring(hud, mark.screen_x, mark.screen_y, mark.radius, 0.2f, 0.95f, 0.3f, 0.55f);
-    }
+    // Selected units get the world-space gui_selectedunits_gl4 platter (TerrainRenderer::set_platter).
     if (g_snap.boxing) {
         const float left = std::min(g_snap.box_x1, g_snap.box_x2);
         const float right = std::max(g_snap.box_x1, g_snap.box_x2);
