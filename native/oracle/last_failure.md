@@ -6,7 +6,7 @@ Entity: two Armada SimpleAI commanders on Supreme Isthmus
 
 Field: both still playing at 10 minutes, each with extractor income
 
-Frame 18000 units 114 armcoms 2 mex 6.9099 6.9006
+Frame 18000 units 116 armcoms 2 mex 6.9099 6.9006
 
 Both commanders stay in the trace and both teams have finished an extractor. Winner is none while both commanders remain. This gate does not compare stocks to a Recoil trace.
 

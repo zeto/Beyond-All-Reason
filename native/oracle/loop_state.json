@@ -1,6 +1,6 @@
 {
-  "milestone": "M6",
-  "slice": "pve",
+  "milestone": "M7",
+  "slice": "hud",
   "iteration": 1,
   "last_gate": "self-pass"
 }
