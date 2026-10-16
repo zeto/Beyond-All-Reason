@@ -10,6 +10,10 @@
 #include "smf_textures.h"
 
 #include <algorithm>
+#include <chrono>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <cmath>
 #include <thread>
 #include <unordered_map>
@@ -50,6 +54,9 @@ struct FrameSlot {
     std::vector<HudSeg> hud_segments;
     id<MTLTexture> los = nil;
     uint32_t los_version = 0;
+    // GPU timing only: a grass-only pass in its own command buffer (same slot ticket).
+    id<MTL4CommandAllocator> grass_allocator = nil;
+    id<MTL4CommandBuffer> grass_command_buffer = nil;
     uint64_t ticket = 0;
     bool pending = false;
 };
@@ -202,6 +209,22 @@ struct TerrainRenderer::Impl {
     id<MTLTexture> grass_perlin = nil;
     id<MTLTexture> grass_height = nil;
     NSUInteger grass_index_count = 0;
+    // Mesh path (--grass-path=mesh).
+    id<MTLRenderPipelineState> grass_mesh_pipeline = nil;
+    id<MTLBuffer> grass_cull = nil;
+    id<MTLBuffer> grass_chunks = nil;
+    NSUInteger grass_chunk_count = 0;
+    bool grass_mesh = false;
+    // GPU timing (set_gpu_timing).
+    bool timing = false;
+    struct TimingShared {
+        std::mutex lock;
+        std::map<uint64_t, GpuFrameTiming> pending;
+        std::map<uint64_t, int> parts;
+        std::vector<GpuFrameTiming> done;
+    };
+    std::shared_ptr<TimingShared> timing_shared = std::make_shared<TimingShared>();
+    id<MTLTexture> timing_color = nil;
     std::vector<uint32_t> grass_tile_offset;
     std::vector<uint32_t> grass_tile_count;
     int grass_cols = 0;
@@ -360,6 +383,9 @@ void retire_slot(id<MTLResidencySet> residency, FrameSlot& slot) {
     if (slot.allocator != nil) {
         [slot.allocator reset];
     }
+    if (slot.grass_allocator != nil) {
+        [slot.grass_allocator reset];
+    }
     slot.pending = false;
 }
 
@@ -497,6 +523,12 @@ struct SceneBindings {
     NSUInteger grass_index_count;
     // Visible tile runs (first instance, count), DrawWorldPreUnit's cullRuns.
     std::vector<std::pair<uint32_t, uint32_t>> grass_runs;
+    id<MTLRenderPipelineState> grass_mesh_pipeline;
+    id<MTLBuffer> grass_cull;
+    id<MTLBuffer> grass_chunks;
+    NSUInteger grass_chunk_count;
+    // GPU timing: CPU ms spent encoding the grass draw is added here when set.
+    double* grass_cpu_ms;
     // ReadMap::HasVisibleWater (some ground below 0); BasicWater skips the draw otherwise.
     bool water_visible = false;
     id<MTLBuffer> pieces;
@@ -869,6 +901,47 @@ void encode_reflection(id<MTL4CommandBuffer> command_buffer, const SceneBindings
     [scene.arguments setAddress:main_uniforms.gpuAddress atIndex:0];
 }
 
+// Map Grass GL4 draw, vertex path (CPU-culled runs) or mesh path (object + mesh stages).
+void encode_grass(id<MTL4RenderCommandEncoder> encoder, const SceneBindings& scene) {
+    const bool grass_mesh = scene.grass_mesh_pipeline != nil && scene.grass_chunk_count > 0;
+    if (scene.grass_pipeline != nil && (grass_mesh || !scene.grass_runs.empty())) {
+        [scene.arguments setTexture:scene.grass_blade.gpuResourceID atIndex:kGrassBladeSlot];
+        [scene.arguments setTexture:scene.grass_perlin.gpuResourceID atIndex:kGrassPerlinSlot];
+        [scene.arguments setTexture:scene.grass_height.gpuResourceID atIndex:kGrassHeightSlot];
+        [scene.arguments setTexture:scene.minimap.gpuResourceID atIndex:kGrassMapColorSlot];
+        [scene.arguments setTexture:scene.shadow_map.gpuResourceID atIndex:2];
+        [scene.arguments setAddress:scene.grass_vertices.gpuAddress atIndex:1];
+        [encoder setDepthStencilState:scene.grass_depth];
+        [encoder setCullMode:MTLCullModeBack];
+        [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
+        if (grass_mesh) {
+            [scene.arguments setAddress:scene.grass_instances.gpuAddress atIndex:3];
+            [scene.arguments setAddress:scene.grass_cull.gpuAddress atIndex:4];
+            [scene.arguments setAddress:scene.grass_chunks.gpuAddress atIndex:5];
+            [scene.arguments setAddress:scene.grass_indices.gpuAddress atIndex:6];
+            [encoder setArgumentTable:scene.arguments
+                             atStages:MTLRenderStageObject | MTLRenderStageMesh | MTLRenderStageFragment];
+            [encoder setRenderPipelineState:scene.grass_mesh_pipeline];
+            [encoder drawMeshThreadgroups:MTLSizeMake(scene.grass_chunk_count, 1, 1)
+                threadsPerObjectThreadgroup:MTLSizeMake(256, 1, 1)
+                  threadsPerMeshThreadgroup:MTLSizeMake(192, 1, 1)];
+        } else {
+            [encoder setRenderPipelineState:scene.grass_pipeline];
+            for (const auto& run : scene.grass_runs) {
+                [scene.arguments setAddress:scene.grass_instances.gpuAddress + run.first * 16 atIndex:3];
+                [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                     indexCount:scene.grass_index_count
+                                      indexType:MTLIndexTypeUInt32
+                                    indexBuffer:scene.grass_indices.gpuAddress
+                              indexBufferLength:scene.grass_indices.length
+                                  instanceCount:run.second];
+            }
+        }
+        [encoder setCullMode:MTLCullModeNone];
+        [encoder setFrontFacingWinding:MTLWindingClockwise];
+    }
+}
+
 void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, id<MTLTexture> depth,
                   const SceneBindings& scene, MTLClearColor clear) {
     MTL4RenderPassDescriptor* pass = [MTL4RenderPassDescriptor new];
@@ -906,28 +979,13 @@ void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, i
 
     // widget:DrawWorldPreUnit (Map Grass GL4): after the ground, before units. Depth test
     // LEQUAL with depth writes, back-face culling.
-    if (scene.grass_pipeline != nil && !scene.grass_runs.empty()) {
-        [scene.arguments setTexture:scene.grass_blade.gpuResourceID atIndex:kGrassBladeSlot];
-        [scene.arguments setTexture:scene.grass_perlin.gpuResourceID atIndex:kGrassPerlinSlot];
-        [scene.arguments setTexture:scene.grass_height.gpuResourceID atIndex:kGrassHeightSlot];
-        [scene.arguments setTexture:scene.minimap.gpuResourceID atIndex:kGrassMapColorSlot];
-        [scene.arguments setTexture:scene.shadow_map.gpuResourceID atIndex:2];
-        [scene.arguments setAddress:scene.grass_vertices.gpuAddress atIndex:1];
-        [encoder setRenderPipelineState:scene.grass_pipeline];
-        [encoder setDepthStencilState:scene.grass_depth];
-        [encoder setCullMode:MTLCullModeBack];
-        [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
-        for (const auto& run : scene.grass_runs) {
-            [scene.arguments setAddress:scene.grass_instances.gpuAddress + run.first * 16 atIndex:3];
-            [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                                 indexCount:scene.grass_index_count
-                                  indexType:MTLIndexTypeUInt32
-                                indexBuffer:scene.grass_indices.gpuAddress
-                          indexBufferLength:scene.grass_indices.length
-                              instanceCount:run.second];
+    {
+        const auto grass_t0 = std::chrono::steady_clock::now();
+        encode_grass(encoder, scene);
+        if (scene.grass_cpu_ms != nullptr) {
+            *scene.grass_cpu_ms +=
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - grass_t0).count();
         }
-        [encoder setCullMode:MTLCullModeNone];
-        [encoder setFrontFacingWinding:MTLWindingClockwise];
     }
 
     // gui_selectedunits_gl4 DrawWorldPreUnit: fill (alpha 0.19), then the 1.3-elmo outline
@@ -1811,6 +1869,40 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
         error = ns_error(ns_error_obj, "water pipeline creation failed");
         return false;
     }
+    {
+        // Mesh-path grass: same fragment function and blend state as grass_pipeline.
+        MTL4LibraryFunctionDescriptor* object = [MTL4LibraryFunctionDescriptor new];
+        object.library = library;
+        object.name = @"grass_os";
+        MTL4LibraryFunctionDescriptor* mesh = [MTL4LibraryFunctionDescriptor new];
+        mesh.library = library;
+        mesh.name = @"grass_ms";
+        MTL4LibraryFunctionDescriptor* fragment = [MTL4LibraryFunctionDescriptor new];
+        fragment.library = library;
+        fragment.name = @"grass_fs";
+        MTL4MeshRenderPipelineDescriptor* desc = [MTL4MeshRenderPipelineDescriptor new];
+        desc.label = @"grass_mesh";
+        desc.objectFunctionDescriptor = object;
+        desc.meshFunctionDescriptor = mesh;
+        desc.fragmentFunctionDescriptor = fragment;
+        desc.maxTotalThreadsPerObjectThreadgroup = 256;
+        desc.maxTotalThreadsPerMeshThreadgroup = 192;
+        desc.payloadMemoryLength = 256 * sizeof(uint32_t);
+        desc.maxTotalThreadgroupsPerMeshGrid = 1024;
+        desc.rasterSampleCount = 1;
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        desc.colorAttachments[0].blendingState = MTL4BlendStateEnabled;
+        desc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+        desc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        desc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+        desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        impl_->grass_mesh_pipeline =
+            [compiler newRenderPipelineStateWithDescriptor:desc compilerTaskOptions:nil error:&ns_error_obj];
+        if (impl_->grass_mesh_pipeline == nil) {
+            error = ns_error(ns_error_obj, "grass mesh pipeline creation failed");
+            return false;
+        }
+    }
     impl_->grass_pipeline = make_pipeline(compiler, library, @"grass_vs", @"grass_fs", true, &ns_error_obj);
     if (impl_->grass_pipeline == nil) {
         error = ns_error(ns_error_obj, "grass pipeline creation failed");
@@ -2111,7 +2203,7 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
     }
 
     MTL4ArgumentTableDescriptor* table_desc = [MTL4ArgumentTableDescriptor new];
-    table_desc.maxBufferBindCount = 4;
+    table_desc.maxBufferBindCount = 7;  // 4..6: mesh-path grass cull, chunks, indices
     table_desc.maxTextureBindCount = kTextureSlots;  // terrain_fs: 0..9, slot 2 the shadow map
     table_desc.maxSamplerStateBindCount = 1;
     table_desc.initializeBindings = YES;
@@ -2243,6 +2335,90 @@ bool TerrainRenderer::set_grass(const GrassData& grass, std::string& error) {
         [impl_->residency addAllocation:a];
     }
     [impl_->residency commit];
+    {
+        // Mesh path: split the patch into meshlets by triangle order, each a contiguous vertex
+        // range of at most 192 vertices and 128 triangles (grass_ms limits), and the instance
+        // list into chunks of at most 256 instances that never cross a 512-elmo tile.
+        struct Meshlet {
+            uint32_t vstart, vcount, istart, icount;
+        };
+        std::vector<Meshlet> meshlets;
+        const std::vector<uint32_t>& idx = grass.patch_indices;
+        size_t t = 0;
+        while (t + 3 <= idx.size()) {
+            uint32_t lo = idx[t], hi = idx[t];
+            size_t end = t;
+            while (end + 3 <= idx.size() && (end - t) / 3 < 128) {
+                const uint32_t nlo = std::min({lo, idx[end], idx[end + 1], idx[end + 2]});
+                const uint32_t nhi = std::max({hi, idx[end], idx[end + 1], idx[end + 2]});
+                if (nhi - nlo + 1 > 192) break;
+                lo = nlo;
+                hi = nhi;
+                end += 3;
+            }
+            if (end == t) {
+                error = "grass: patch triangle spans more than 192 vertices";
+                return false;
+            }
+            meshlets.push_back({lo, hi - lo + 1, static_cast<uint32_t>(t), static_cast<uint32_t>(end - t)});
+            t = end;
+        }
+        if (meshlets.empty() || meshlets.size() > 4) {
+            error = "grass: patch needs " + std::to_string(meshlets.size()) + " meshlets (mesh path supports 1..4)";
+            return false;
+        }
+        float rxz = 0, vy = 0;
+        for (size_t v = 0; v + 8 <= grass.patch_vertices.size(); v += 8) {
+            const float x = grass.patch_vertices[v], y = grass.patch_vertices[v + 1], z = grass.patch_vertices[v + 2];
+            rxz = std::max(rxz, std::sqrt(x * x + z * z));
+            vy = std::max(vy, std::fabs(y));
+        }
+        std::vector<uint32_t> chunks;
+        for (size_t tile = 0; tile < grass.tile_count.size(); ++tile) {
+            for (uint32_t k = 0; k < grass.tile_count[tile]; k += 256) {
+                chunks.push_back(static_cast<uint32_t>(tile));
+                chunks.push_back(grass.tile_offset[tile] + k);
+                chunks.push_back(std::min<uint32_t>(256, grass.tile_count[tile] - k));
+                chunks.push_back(0);
+            }
+        }
+        // Same tile sphere as cull_grass.
+        const float half = grass.tile_world * 0.5f;
+        const float slack = (impl_->height_max - impl_->height_min) * 0.5f + 200.f;
+        const float radius = std::sqrt(half * half * 2.f) + slack;
+        const float fade_end = grass.fade_end * grass.distance_mult;
+        struct Cull {
+            float tile[4];
+            float inst[4];
+            uint32_t grid[4];
+            Meshlet meshlets[4];
+        } cull{};
+        cull.tile[0] = grass.tile_world;
+        cull.tile[1] = (impl_->height_min + impl_->height_max) * 0.5f;
+        cull.tile[2] = radius;
+        cull.tile[3] = fade_end + radius;
+        cull.inst[0] = rxz;
+        cull.inst[1] = fade_end;
+        cull.inst[2] = vy;
+        cull.grid[0] = static_cast<uint32_t>(grass.grid_cols);
+        cull.grid[1] = static_cast<uint32_t>(grass.grid_rows);
+        cull.grid[2] = static_cast<uint32_t>(chunks.size() / 4);
+        cull.grid[3] = static_cast<uint32_t>(meshlets.size());
+        for (size_t m = 0; m < meshlets.size(); ++m) cull.meshlets[m] = meshlets[m];
+        impl_->grass_cull = upload(impl_->device, &cull, sizeof(cull));
+        impl_->grass_chunks = upload(impl_->device, chunks.data(), chunks.size() * sizeof(uint32_t));
+        if (impl_->grass_cull == nil || impl_->grass_chunks == nil) {
+            error = "grass: mesh-path upload failed";
+            return false;
+        }
+        [impl_->residency addAllocation:impl_->grass_cull];
+        [impl_->residency addAllocation:impl_->grass_chunks];
+        [impl_->residency commit];
+        impl_->grass_chunk_count = chunks.size() / 4;
+        std::fprintf(stderr, "grass mesh: %zu meshlets (", meshlets.size());
+        for (const Meshlet& m : meshlets) std::fprintf(stderr, " %u v/%u t", m.vcount, m.icount / 3);
+        std::fprintf(stderr, " ), %zu chunks, patch xz radius %.2f, max y %.2f\n", chunks.size() / 4, rxz, vy);
+    }
     impl_->grass_index_count = grass.patch_indices.size();
     impl_->grass_tile_offset = grass.tile_offset;
     impl_->grass_tile_count = grass.tile_count;
@@ -2262,6 +2438,17 @@ bool TerrainRenderer::set_grass(const GrassData& grass, std::string& error) {
     impl_->grass_heights.resize(static_cast<size_t>(grass.heightmap.width) * grass.heightmap.height);
     std::memcpy(impl_->grass_heights.data(), grass.heightmap.levels[0].data(), impl_->grass_heights.size() * 4);
     return true;
+}
+
+void TerrainRenderer::set_grass_path(GrassPath path) { impl_->grass_mesh = path == GrassPath::Mesh; }
+
+void TerrainRenderer::set_gpu_timing(bool enabled) { impl_->timing = enabled; }
+
+std::vector<GpuFrameTiming> TerrainRenderer::take_gpu_timings() {
+    std::lock_guard<std::mutex> guard(impl_->timing_shared->lock);
+    std::vector<GpuFrameTiming> out;
+    out.swap(impl_->timing_shared->done);
+    return out;
 }
 
 bool TerrainRenderer::set_model(const ModelMesh& model, float color_r, float color_g, float color_b,
@@ -2403,6 +2590,7 @@ void TerrainRenderer::attach(void* metal_layer) {
 }
 
 bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
+    const auto encode_t0 = std::chrono::steady_clock::now();
     if (frame.view_proj == nullptr) {
         error = "terrain draw is missing a view matrix";
         return false;
@@ -2432,11 +2620,15 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
         }
     }
     FrameSlot& slot = impl_->slots[impl_->slot_index];
+    // Encode time excludes the two blocking waits: slot reuse and nextDrawable.
+    double wait_ms = 0;
     if (slot.pending) {
+        const auto wait_t0 = std::chrono::steady_clock::now();
         if (slot.ticket != 0 && ![impl_->fence waitUntilSignaledValue:slot.ticket timeoutMS:5000]) {
             error = "gpu frame timed out";
             return false;
         }
+        wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_t0).count();
         retire_slot(impl_->residency, slot);
         // The drawable stays checked out until this removal is committed. Doing it
         // after nextDrawable left the pool empty and blocked the present thread.
@@ -2707,7 +2899,9 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
         return false;
     }
     // Acquire the drawable after the CPU prep so Core Text does not hold a pooled texture.
+    const auto drawable_t0 = std::chrono::steady_clock::now();
     id<CAMetalDrawable> drawable = [layer nextDrawable];
+    wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - drawable_t0).count();
     if (drawable == nil) {
         error = "CAMetalLayer nextDrawable returned nil";
         return false;
@@ -2774,9 +2968,20 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     scene.grass_perlin = impl_->grass_perlin;
     scene.grass_height = impl_->grass_height;
     scene.grass_index_count = impl_->grass_index_count;
-    if (impl_->grass_vertices != nil && frame.eye != nullptr && frame.view_proj != nullptr) {
+    const bool grass_mesh = impl_->grass_mesh && impl_->grass_mesh_pipeline != nil && impl_->grass_chunk_count > 0;
+    scene.grass_mesh_pipeline = grass_mesh && impl_->grass_vertices != nil ? impl_->grass_mesh_pipeline : nil;
+    scene.grass_cull = impl_->grass_cull;
+    scene.grass_chunks = impl_->grass_chunks;
+    scene.grass_chunk_count = grass_mesh ? impl_->grass_chunk_count : 0;
+    scene.grass_runs.clear();
+    double grass_cpu_ms = 0;
+    scene.grass_cpu_ms = impl_->timing ? &grass_cpu_ms : nullptr;
+    if (!grass_mesh && impl_->grass_vertices != nil && frame.eye != nullptr && frame.view_proj != nullptr) {
+        const auto cull_t0 = std::chrono::steady_clock::now();
         impl_->cull_grass(frame.view_proj, frame.eye, scene.grass_runs);
+        grass_cpu_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cull_t0).count();
     }
+
     scene.water_visible = impl_->map[2] > 0.5f;
     scene.pieces = slot.pieces;
     scene.shadow_map = impl_->shadow_map;
@@ -2797,6 +3002,7 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     encode_reflection(slot.command_buffer, scene, impl_->reflection, impl_->reflection_depth, slot.face_uniforms,
                       slot.uniforms, reflection_faces, clear);
     encode_scene(slot.command_buffer, drawable.texture, impl_->depth, scene, clear);
+    scene.grass_cpu_ms = nullptr;  // only the presented pass counts
     encode_hud((__bridge void*)slot.command_buffer, (__bridge void*)drawable.texture);
     if (shot) {
         encode_scene(slot.command_buffer, impl_->offscreen, impl_->depth, scene, clear);
@@ -2817,7 +3023,90 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     [slot.command_buffer endCommandBuffer];
 
     id<MTL4CommandBuffer> buffers[] = {slot.command_buffer};
-    [impl_->queue commit:buffers count:1];
+    if (impl_->timing) {
+        const uint64_t frame_id = impl_->ticket + 1;
+        const double encode_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - encode_t0).count() -
+            wait_ms;
+        auto shared = impl_->timing_shared;
+        {
+            std::lock_guard<std::mutex> guard(shared->lock);
+            GpuFrameTiming& t = shared->pending[frame_id];
+            t.frame = frame_id;
+            t.encode_ms = encode_ms;
+            t.grass_cpu_ms = grass_cpu_ms;
+        }
+        auto finish = [shared, frame_id](int parts_needed) {
+            if (++shared->parts[frame_id] == parts_needed) {
+                shared->done.push_back(shared->pending[frame_id]);
+                shared->pending.erase(frame_id);
+                shared->parts.erase(frame_id);
+            }
+        };
+        // Grass-only pass: same grass draw, own command buffer, so its GPU time is the grass
+        // pass alone (Apple GPUs have no usable timestamps inside a render pass). It loads the
+        // frame's depth and draws into a scratch colour target; nothing reads either afterwards.
+        const bool isolate = scene.grass_pipeline != nil && impl_->grass_vertices != nil;
+        if (isolate && (impl_->timing_color == nil || impl_->timing_color.width != width ||
+                        impl_->timing_color.height != height)) {
+            if (impl_->timing_color != nil) [impl_->residency removeAllocation:impl_->timing_color];
+            MTLTextureDescriptor* desc =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                   width:width
+                                                                  height:height
+                                                               mipmapped:NO];
+            desc.usage = MTLTextureUsageRenderTarget;
+            desc.storageMode = MTLStorageModePrivate;
+            impl_->timing_color = [impl_->device newTextureWithDescriptor:desc];
+            [impl_->residency addAllocation:impl_->timing_color];
+            [impl_->residency commit];
+        }
+        const int parts_needed = isolate ? 2 : 1;
+        MTL4CommitOptions* options = [MTL4CommitOptions new];
+        [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            std::lock_guard<std::mutex> guard(shared->lock);
+            shared->pending[frame_id].gpu_ms = (feedback.GPUEndTime - feedback.GPUStartTime) * 1000.0;
+            finish(parts_needed);
+        }];
+        [impl_->queue commit:buffers count:1 options:options];
+        if (isolate) {
+            if (slot.grass_allocator == nil) {
+                slot.grass_allocator =
+                    [impl_->device newCommandAllocatorWithDescriptor:[MTL4CommandAllocatorDescriptor new] error:nil];
+                slot.grass_command_buffer = [impl_->device newCommandBuffer];
+            }
+            [slot.grass_command_buffer beginCommandBufferWithAllocator:slot.grass_allocator];
+            [slot.grass_command_buffer useResidencySet:impl_->residency];
+            MTL4RenderPassDescriptor* pass = [MTL4RenderPassDescriptor new];
+            pass.colorAttachments[0].texture = impl_->timing_color;
+            pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            pass.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+            pass.depthAttachment.texture = impl_->depth;
+            pass.depthAttachment.loadAction = MTLLoadActionLoad;
+            pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+            id<MTL4RenderCommandEncoder> encoder = [slot.grass_command_buffer renderCommandEncoderWithDescriptor:pass];
+            MTLViewport viewport{0, 0, static_cast<double>(width), static_cast<double>(height), 0, 1};
+            [encoder setViewport:viewport];
+            [encoder setArgumentTable:impl_->arguments atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+            [impl_->arguments setAddress:slot.uniforms.gpuAddress atIndex:0];
+            if (scene.los != nil) {
+                [impl_->arguments setTexture:scene.los.gpuResourceID atIndex:kLosSlot];
+            }
+            encode_grass(encoder, scene);
+            [encoder endEncoding];
+            [slot.grass_command_buffer endCommandBuffer];
+            id<MTL4CommandBuffer> grass_buffers[] = {slot.grass_command_buffer};
+            MTL4CommitOptions* grass_options = [MTL4CommitOptions new];
+            [grass_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                std::lock_guard<std::mutex> guard(shared->lock);
+                shared->pending[frame_id].grass_gpu_ms = (feedback.GPUEndTime - feedback.GPUStartTime) * 1000.0;
+                finish(parts_needed);
+            }];
+            [impl_->queue commit:grass_buffers count:1 options:grass_options];
+        }
+    } else {
+        [impl_->queue commit:buffers count:1];
+    }
     [impl_->queue signalDrawable:drawable];
     [drawable present];
 

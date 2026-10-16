@@ -1,0 +1,7 @@
+{
+  "map": "Supreme Isthmus v2.1",
+  "shots": [
+    {"id": "dense", "x": 7600, "z": 4900, "distance": 900, "tilt": 1.3, "yaw": 3.1416},
+    {"id": "wide", "x": 7000, "z": 5000, "distance": 3000, "tilt": 0.9, "yaw": 2.6}
+  ]
+}

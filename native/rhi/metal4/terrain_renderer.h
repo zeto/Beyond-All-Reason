@@ -4,7 +4,9 @@
 #include "s3o.h"
 #include "smf.h"
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace bar {
 
@@ -18,6 +20,19 @@ struct TerrainFrame {
     const char* screenshot_ppm = nullptr;
     // Widget draw list from the sim tick. Null skips the HUD pass.
     const HudList* hud = nullptr;
+};
+
+// Map Grass GL4 draw path. Vertex: CPU tile culling, one instanced draw per visible run.
+// Mesh: object + mesh shader stages, tile / instance culling on the GPU.
+enum class GrassPath { Vertex, Mesh };
+
+// One finished frame from the commit feedback handlers (no extra CPU wait).
+struct GpuFrameTiming {
+    uint64_t frame = 0;
+    double gpu_ms = 0;     // commit feedback GPUEndTime - GPUStartTime
+    double encode_ms = 0;  // CPU time in draw() to commit, minus the slot and nextDrawable waits
+    double grass_gpu_ms = 0;  // the grass draw alone, re-encoded in its own command buffer
+    double grass_cpu_ms = 0;  // CPU tile culling (vertex path) plus encoding the grass draw
 };
 
 // Metal 4 types stay inside the .mm file.
@@ -34,6 +49,12 @@ public:
     bool set_model(const ModelMesh& model, float color_r, float color_g, float color_b, std::string& error);
     // Map Grass GL4 port (map/grass.h). Without a call no grass is drawn.
     bool set_grass(const struct GrassData& grass, std::string& error);
+    // Default Vertex. Mesh needs set_grass to have built the meshlets; it is checked there.
+    void set_grass_path(GrassPath path);
+    // Commit feedback GPU time and CPU encode time per frame. Off by default.
+    void set_gpu_timing(bool enabled);
+    // Frames whose GPU data has arrived since the last call.
+    std::vector<GpuFrameTiming> take_gpu_timings();
     void set_pose(float x, float y, float z, float heading, float bank = 0);
     // Column-major piece matrices, 16 floats each. A 0 in element 15 hides that piece.
     void set_pieces(const float* column_major, int count);

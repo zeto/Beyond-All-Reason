@@ -51,6 +51,7 @@ void objc_autoreleasePoolPop(void* pool);
 #include <cstdlib>
 #include <filesystem>
 #include <algorithm>
+#include <thread>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -80,6 +81,10 @@ struct Options {
     bool lock_camera = false;
     // Skip Map Grass GL4 (A/B timing of the grass pass).
     bool no_grass = false;
+    // --grass-path=mesh|vertex: object/mesh shader path (default) or the CPU-culled instanced draws.
+    bool grass_mesh = true;
+    // --gpu-timing FILE.csv: per-frame GPU ms (commit feedback) and CPU encode ms (waits excluded).
+    std::string gpu_timing;
     // The LOS view (gfx_los_view / gfx_los_colors) is on by default, as in BAR.
     bool no_los_view = false;
     // FILE#ID: with --lock-camera, hold that bookmark camera instead of following unit 0.
@@ -184,6 +189,16 @@ bool parse_args(int argc, char** argv, Options& options) {
                 return false;
             }
             options.fixed_camera = value;
+        } else if (arg == "--grass-path=vertex") {
+            options.grass_mesh = false;
+        } else if (arg == "--grass-path=mesh") {
+            options.grass_mesh = true;
+        } else if (arg == "--gpu-timing") {
+            const char* value = need("--gpu-timing");
+            if (value == nullptr) {
+                return false;
+            }
+            options.gpu_timing = value;
         } else if (arg == "--no-grass") {
             options.no_grass = true;
         } else if (arg == "--no-los-view") {
@@ -496,6 +511,10 @@ int run_terrain(const Options& options, const std::string& game_name) {
         return 1;
     }
     renderer.set_metal_hud(user_window && !mesh.metal_map);
+    renderer.set_grass_path(options.grass_mesh ? bar::GrassPath::Mesh : bar::GrassPath::Vertex);
+    std::cout << "grass path: " << (options.grass_mesh ? "mesh" : "vertex") << "\n";
+    renderer.set_gpu_timing(!options.gpu_timing.empty());
+    std::vector<bar::GpuFrameTiming> gpu_timings;
     std::cout << "spot rings: " << ((user_window && !mesh.metal_map) ? "on" : "off") << "\n";
 
     std::vector<bar::UnitSpawn> units;
@@ -1735,6 +1754,11 @@ int run_terrain(const Options& options, const std::string& game_name) {
                 std::cerr << "draw: " << error << "\n";
                 return 1;
             }
+            if (!options.gpu_timing.empty()) {
+                for (const bar::GpuFrameTiming& t : renderer.take_gpu_timings()) {
+                    gpu_timings.push_back(t);
+                }
+            }
             ++presented;
             if (scripted && anim.ready && !options.pieces.empty() && presented % 15 == 0) {
                 const bool append = presented != 15;
@@ -1803,6 +1827,26 @@ int run_terrain(const Options& options, const std::string& game_name) {
             }
         }
     }
+    if (!options.gpu_timing.empty()) {
+        // Frames still in flight report shortly after their slot's work completes.
+
+        for (int wait = 0; wait < 20; ++wait) {
+            for (const bar::GpuFrameTiming& t : renderer.take_gpu_timings()) {
+                gpu_timings.push_back(t);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        std::sort(gpu_timings.begin(), gpu_timings.end(),
+                  [](const bar::GpuFrameTiming& x, const bar::GpuFrameTiming& y) { return x.frame < y.frame; });
+        std::ofstream csv(options.gpu_timing, std::ios::trunc);
+        csv << "frame,gpu_ms,encode_ms,grass_gpu_ms,grass_cpu_ms\n";
+        for (const bar::GpuFrameTiming& t : gpu_timings) {
+            csv << t.frame << "," << t.gpu_ms << "," << t.encode_ms << "," << t.grass_gpu_ms << ","
+                << t.grass_cpu_ms << "\n";
+        }
+        std::cout << "gpu timing: " << gpu_timings.size() << " frames -> " << options.gpu_timing << "\n";
+    }
+
     if (!options.trace.empty()) {
         const std::filesystem::path behavior_path =
             std::filesystem::path(options.trace).parent_path() / "behavior.json";

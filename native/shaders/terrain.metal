@@ -643,20 +643,16 @@ struct GrassOut {
     float4 params;    // x distance fade, y shadow, z LOS, w wind shade
 };
 
-vertex GrassOut grass_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
-                         const device GrassVertex* vertices [[buffer(1)]],
-                         const device float4* instances [[buffer(3)]],
-                         constant Uniforms& u [[buffer(0)]],
-                         depth2d<float> shadow_map [[texture(2)]],
-                         texture2d<float> perlin [[texture(19)]],
-                         texture2d<float> heightmap [[texture(20)]],
-                         texture2d<float> map_color_tex [[texture(21)]],
-                         texture2d<float> los_tex [[texture(22)]]) {
+// One blade-patch vertex for one instance; shared by the vertex path (grass_vs) and the
+// mesh path (grass_ms) so both shade identically.
+static inline GrassOut grass_vertex(GrassVertex vert, float4 inst, constant Uniforms& u,
+                                    depth2d<float> shadow_map, texture2d<float> perlin,
+                                    texture2d<float> heightmap, texture2d<float> map_color_tex,
+                                    texture2d<float> los_tex) {
     constexpr sampler lin(coord::normalized, filter::linear, mip_filter::linear, address::repeat);
     constexpr sampler clamp_s(coord::normalized, filter::linear, address::clamp_to_edge);
     constexpr sampler cmp(coord::normalized, filter::linear, address::clamp_to_edge, compare_func::less_equal);
-    const GrassVertex vert = vertices[vid];
-    const float4 inst = instances[iid];  // x, rot, z, size
+    // inst: x, rot, z, size
     GrassOut out;
     out.position = float4(2.0, 2.0, 2.0, 1.0);
     out.tex = float4(0.0);
@@ -721,6 +717,148 @@ vertex GrassOut grass_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
     out.tex = float4(vert.pos_u.w, vert.norm_v.w, 0.0, 0.0);
     out.position = u.view_proj * float4(p, 1.0);
     return out;
+}
+
+vertex GrassOut grass_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
+                         const device GrassVertex* vertices [[buffer(1)]],
+                         const device float4* instances [[buffer(3)]],
+                         constant Uniforms& u [[buffer(0)]],
+                         depth2d<float> shadow_map [[texture(2)]],
+                         texture2d<float> perlin [[texture(19)]],
+                         texture2d<float> heightmap [[texture(20)]],
+                         texture2d<float> map_color_tex [[texture(21)]],
+                         texture2d<float> los_tex [[texture(22)]]) {
+    return grass_vertex(vertices[vid], instances[iid], u, shadow_map, perlin, heightmap, map_color_tex, los_tex);
+}
+
+// Mesh-shader grass path (--grass-path=mesh). The object stage does the per-frame tile culling
+// that cull_grass does on the CPU for the vertex path (fadeEnd + tileRadius distance, tile bounding
+// sphere against the frustum), then drops instances the vertex path would draw fully discarded:
+// size <= 0, origin outside clip z (grass_vs collapses every vertex), and patches whose nearest
+// possible vertex is past fadeEnd (distance fade 0, alpha below the threshold). Survivors go
+// to the mesh stage in instance order, one mesh threadgroup per patch meshlet.
+struct GrassMeshlet {
+    uint vstart;
+    uint vcount;
+    uint istart;
+    uint icount;
+};
+
+struct GrassCull {
+    float4 tile;   // x tile world size, y tile mid height, z tile radius, w fadeEnd + radius
+    float4 inst;   // x patch xz radius, y fadeEnd, z max |vertex y| (wind lever arm)
+    uint4 grid;    // x cols, y rows, z chunk count, w meshlets per patch
+    GrassMeshlet meshlets[4];
+};
+
+constant uint kGrassChunk = 256;
+constant uint kGrassMeshVerts = 192;
+constant uint kGrassMeshPrims = 128;
+
+struct GrassPayload {
+    uint inst[kGrassChunk];
+};
+
+[[object]] void grass_os(object_data GrassPayload& payload [[payload]],
+                         mesh_grid_properties grid,
+                         uint chunk_id [[threadgroup_position_in_grid]],
+                         uint tid [[thread_index_in_threadgroup]],
+                         uint lane [[thread_index_in_simdgroup]],
+                         uint simd_id [[simdgroup_index_in_threadgroup]],
+                         constant Uniforms& u [[buffer(0)]],
+                         const device float4* instances [[buffer(3)]],
+                         constant GrassCull& gc [[buffer(4)]],
+                         const device uint4* chunks [[buffer(5)]]) {
+    threadgroup uint simd_counts[kGrassChunk / 32];
+    threadgroup uint tile_ok;
+    const uint4 chunk = chunks[chunk_id];  // tile, first instance, count
+    if (tid == 0) {
+        const uint tx = chunk.x % gc.grid.x;
+        const uint tz = chunk.x / gc.grid.x;
+        const float half_w = gc.tile.x * 0.5;
+        const float cx = float(tx) * gc.tile.x + half_w;
+        const float cz = float(tz) * gc.tile.x + half_w;
+        const float dx = cx - u.eye.x, dz = cz - u.eye.z;
+        bool visible = dx * dx + dz * dz < gc.tile.w * gc.tile.w;
+        if (visible) {
+            const float4x4 m = u.view_proj;
+            for (int k = 0; k < 6 && visible; ++k) {
+                float4 pl;
+                for (int i = 0; i < 4; ++i) {
+                    const float r0 = m[i][0], r1 = m[i][1], r2 = m[i][2], r3 = m[i][3];
+                    const float v = k == 0 ? r3 + r0 : k == 1 ? r3 - r0 : k == 2 ? r3 + r1 : k == 3 ? r3 - r1
+                                  : k == 4 ? r2 : r3 - r2;
+                    pl[i] = v;
+                }
+                const float len = length(pl.xyz);
+                if ((pl.x * cx + pl.y * gc.tile.y + pl.z * cz + pl.w) / len < -gc.tile.z) visible = false;
+            }
+        }
+        tile_ok = visible ? 1u : 0u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    bool keep = false;
+    uint iid = chunk.y + tid;
+    if (tile_ok != 0u && tid < chunk.z) {
+        const float4 inst = instances[iid];
+        const float4 clip0 = u.view_proj * float4(inst.x, 0.0, inst.z, 1.0);
+        const float absw = abs(clip0.w);
+        keep = inst.w > 0.0 && absw >= 0.00001 && clip0.z >= -absw && clip0.z <= absw;
+        if (keep) {
+            // Nearest any vertex can get: rotation keeps the xz radius; the wind adds at most
+            // |noise.xz| <= 0.7072 times y * size * windStrength * strength.
+            const float extent = inst.w * (gc.inst.x + 0.7072 * gc.inst.z * abs(u.grass_b.x * u.grass_u.z));
+            const float reach = length(inst.xz - u.eye.xz) - extent;
+            keep = reach < gc.inst.y;
+        }
+    }
+    const uint flag = keep ? 1u : 0u;
+    const uint before = simd_prefix_exclusive_sum(flag);
+    const uint total = simd_sum(flag);
+    if (lane == 0) simd_counts[simd_id] = total;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint base = 0;
+    uint all = 0;
+    for (uint k = 0; k < kGrassChunk / 32; ++k) {
+        const uint c = simd_counts[k];
+        if (k < simd_id) base += c;
+        all += c;
+    }
+    if (keep) payload.inst[base + before] = iid;
+    if (tid == 0) grid.set_threadgroups_per_grid(uint3(all * gc.grid.w, 1, 1));
+}
+
+using GrassMesh = metal::mesh<GrassOut, void, kGrassMeshVerts, kGrassMeshPrims, topology::triangle>;
+
+[[mesh]] void grass_ms(GrassMesh out,
+                       const object_data GrassPayload& payload [[payload]],
+                       uint group [[threadgroup_position_in_grid]],
+                       uint tid [[thread_index_in_threadgroup]],
+                       constant Uniforms& u [[buffer(0)]],
+                       const device GrassVertex* vertices [[buffer(1)]],
+                       const device float4* instances [[buffer(3)]],
+                       constant GrassCull& gc [[buffer(4)]],
+                       const device uint* indices [[buffer(6)]],
+                       depth2d<float> shadow_map [[texture(2)]],
+                       texture2d<float> perlin [[texture(19)]],
+                       texture2d<float> heightmap [[texture(20)]],
+                       texture2d<float> map_color_tex [[texture(21)]],
+                       texture2d<float> los_tex [[texture(22)]]) {
+    const uint per = gc.grid.w;
+    const uint iid = payload.inst[group / per];
+    const GrassMeshlet ml = gc.meshlets[group % per];
+    const float4 inst = instances[iid];
+    if (tid < ml.vcount) {
+        out.set_vertex(tid, grass_vertex(vertices[ml.vstart + tid], inst, u, shadow_map, perlin, heightmap,
+                                         map_color_tex, los_tex));
+    }
+    const uint prims = ml.icount / 3;
+    if (tid < prims) {
+        for (uint k = 0; k < 3; ++k) {
+            out.set_index(tid * 3 + k, uchar(indices[ml.istart + tid * 3 + k] - ml.vstart));
+        }
+    }
+    if (tid == 0) out.set_primitive_count(prims);
 }
 
 fragment float4 grass_fs(GrassOut in [[stage_in]],
