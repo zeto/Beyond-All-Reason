@@ -1,6 +1,7 @@
 #include "smf_textures.h"
 
 #include "smf.h"
+#include "water_textures.h"
 #include "../vfs/archive.h"
 
 extern "C" {
@@ -488,6 +489,18 @@ bool load_terrain_textures(const TerrainMesh& mesh, TerrainTextures& out, std::s
     std::memcpy(out.normals.levels[0].data(), mesh.normals_xz.data(), mesh.normals_xz.size() * 2);
 
     load_water_texture(mesh, out);
+    if (!mesh.game_root.empty()) {
+        std::vector<uint8_t> foam;
+        std::string foam_error;
+        if (read_disk_file(mesh.game_root + "/bitmaps/atmos/waterfoam.tga", foam) &&
+            decode_tga(foam, out.water_foam, foam_error)) {
+            build_rgba_mips(out.water_foam);
+        } else {
+            out.water_foam = GpuImage{};
+        }
+    }
+    out.water_normals = generate_wave_normals(256, 1u);
+    out.water_caustics = generate_caustics(256, 2u);
     if (!mesh.sky_box.empty()) {
         std::string sky_error;
         if (!load_image(mesh.archive_path, mesh.sky_box, out.sky_box, sky_error) || out.sky_box.faces != 6) {

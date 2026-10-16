@@ -364,6 +364,29 @@ bool read_mapinfo(const std::vector<uint8_t>& bytes, MapInfo& info, std::string&
         read_field_vec3(state, "surfacecolor", w.surface_color);
         read_number(state, "surfacealpha", w.surface_alpha);
         read_string(state, "texture", w.texture);
+        read_number(state, "ambientfactor", w.ambient_factor);
+        read_number(state, "diffusefactor", w.diffuse_factor);
+        read_number(state, "specularfactor", w.specular_factor);
+        read_number(state, "specularpower", w.specular_power);
+        read_field_vec3(state, "diffusecolor", w.diffuse_color);
+        read_field_vec3(state, "specularcolor", w.specular_color);
+        read_number(state, "fresnelmin", w.fresnel_min);
+        read_number(state, "fresnelmax", w.fresnel_max);
+        read_number(state, "fresnelpower", w.fresnel_power);
+        read_number(state, "reflectiondistortion", w.reflection_distortion);
+        read_number(state, "perlinstartfreq", w.perlin_start_freq);
+        read_number(state, "perlinlacunarity", w.perlin_lacunarity);
+        read_number(state, "perlinamplitude", w.perlin_amplitude);
+        read_number(state, "windspeed", w.wind_speed);
+        read_bool(state, "shorewaves", w.shore_waves);
+        read_number(state, "causticsresolution", w.caustics_resolution);
+        read_number(state, "causticsstrength", w.caustics_strength);
+        read_number(state, "waveoffsetfactor", w.wave_offset_factor);
+        read_number(state, "wavelength", w.wave_length);
+        // The map key is spelled "waveFoamDisortion"; accept both spellings.
+        read_number(state, "wavefoamdisortion", w.wave_foam_distortion);
+        read_number(state, "wavefoamdistortion", w.wave_foam_distortion);
+        read_number(state, "wavefoamintensity", w.wave_foam_intensity);
     }
     lua_pop(state, 1);
 

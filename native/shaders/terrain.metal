@@ -37,6 +37,14 @@ struct Uniforms {
     // Water planeColor; w 1 when the map has a water plane.
     float4 plane_color;
     float4 water_repeat;
+    float4 water_fresnel;
+    float4 water_waves;
+    float4 water_light;
+    float4 water_specular;
+    float4 water_surface;
+    float4 water_shore;
+    float4 water_extra;
+    float4 water_screen;
 };
 
 // Recoil CGlobalRendering::SMF_INTENSITY_MULT.
@@ -460,19 +468,121 @@ fragment float4 sky_fs(SkyOut in [[stage_in]],
     return float4(mix(tex.rgb, u.plane_color.rgb, below), 1.0);
 }
 
-// CBasicWater::Draw: the water texture (mipmapped, GL_REPEAT) times ucolor (0.7, 0.7, 0.7, 0.5),
-// alpha-blended with depth writes off. Fog is skipped like the ground (fogStart 0.8).
+// Advanced water, written for bar-metal from the mapinfo water parameters:
+// screen-space refraction of the (already depth-absorbed) seabed, procedural wave normals,
+// Fresnel sky/terrain reflection from the reflection cube, sun specular, shore foam bands
+// driven by water depth, and procedural caustics in the shallows.
+float3 water_world_at(constant Uniforms& u, float2 screen_uv, float d) {
+    const float4 ndc = float4(screen_uv.x * 2.0 - 1.0, 1.0 - screen_uv.y * 2.0, d, 1.0);
+    const float4 w = u.sky_inv * ndc;
+    return w.xyz / w.w;
+}
+
 fragment float4 water_fs(Varying in [[stage_in]],
-                         constant Uniforms& uniforms [[buffer(0)]],
-                         texture2d<float> water_tex [[texture(12)]]) {
-    constexpr sampler water_s(coord::normalized, filter::linear, mip_filter::linear, address::repeat);
-    const float4 ucolor = float4(0.7, 0.7, 0.7, 0.5);
-    // CBitmap::AllocDummy(SColor(0, 0, 255, 255)) when the texture is missing.
-    float4 tex = float4(0.0, 0.0, 1.0, 1.0);
-    if (uniforms.water_repeat.z > 0.5) {
-        tex = water_tex.sample(water_s, in.uv * uniforms.water_repeat.xy);
+                         constant Uniforms& u [[buffer(0)]],
+                         texturecube<float> reflect_tex [[texture(11)]],
+                         texture2d<float> water_tex [[texture(12)]],
+                         texture2d<float> scene_tex [[texture(13)]],
+                         depth2d<float> scene_depth [[texture(14)]],
+                         texture2d<float> foam_tex [[texture(15)]],
+                         texture2d<float> wave_tex [[texture(16)]],
+                         texture2d<float> caustics_tex [[texture(17)]]) {
+    constexpr sampler wrap_s(coord::normalized, filter::linear, mip_filter::linear, address::repeat);
+    constexpr sampler clamp_s(coord::normalized, filter::linear, address::clamp_to_edge);
+    constexpr sampler cube_s(coord::normalized, filter::linear, address::clamp_to_edge);
+
+    const float t = u.water_surface.w;
+    const float3 world = float3(in.world_xz.x, in.world_y, in.world_xz.y);
+    const float2 map_uv = in.world_xz / max(u.map.xy, float2(1.0));
+
+    // Wave normal: four octaves of the procedural normal map, each scrolling with the wind.
+    float2 slope = float2(0.0);
+    float freq = u.water_waves.x;
+    float amp = 1.0;
+    float amp_sum = 0.0;
+    for (int o = 0; o < 4; ++o) {
+        const float a = 0.7 + 1.9 * float(o);
+        const float2 dir = float2(cos(a), sin(a));
+        const float2 uv = map_uv * freq + dir * t * u.water_waves.w * 0.03 * (1.0 + 0.35 * float(o));
+        const float3 n = wave_tex.sample(wrap_s, uv).xyz * 2.0 - 1.0;
+        slope += amp * n.xy / max(n.z, 0.2);
+        amp_sum += amp;
+        freq *= u.water_waves.y;
+        amp *= u.water_waves.z * 0.8;
     }
-    return tex * ucolor;
+    slope /= max(amp_sum, 1e-3);
+    const float3 N = normalize(float3(slope.x * 0.6, 1.0, slope.y * 0.6));
+
+    const float3 V = normalize(u.eye.xyz - world);
+    const float2 screen = in.position.xy * u.water_screen.xy;
+    const uint2 size = uint2(scene_depth.get_width(), scene_depth.get_height());
+
+    // Seabed under this pixel, and the water depth above it.
+    const uint2 pix = min(uint2(in.position.xy), size - 1);
+    const float3 ground = water_world_at(u, screen, scene_depth.read(pix));
+    const float depth = max(0.0, world.y - ground.y);
+
+    // Refraction: offset by the wave slope, more in deep water; reject samples that land on
+    // geometry above the surface so shoreline objects do not smear into the water.
+    float2 refr_uv = screen + N.xz * 0.03 * u.water_fresnel.w * saturate(depth / 30.0);
+    const uint2 rpix = min(uint2(refr_uv * float2(size)), size - 1);
+    const float3 refr_ground = water_world_at(u, refr_uv, scene_depth.read(rpix));
+    float bed_depth = max(0.0, world.y - refr_ground.y);
+    if (refr_ground.y > world.y) {
+        refr_uv = screen;
+        bed_depth = depth;
+    }
+    float3 refr = scene_tex.sample(clamp_s, refr_uv).rgb;
+
+    // Caustics: two scrolling layers of the procedural network, multiplied, fading with depth.
+    {
+        const float res = max(u.water_extra.x, 1.0);
+        const float2 cuv = ground.xz / (res * 4.0);
+        const float c1 = caustics_tex.sample(wrap_s, cuv + float2(0.013, 0.007) * t).r;
+        const float c2 = caustics_tex.sample(wrap_s, cuv * 1.37 - float2(0.009, 0.015) * t).r;
+        const float shallow = exp(-bed_depth / 8.0) * saturate(bed_depth / 2.0);
+        refr += float3(sqrt(c1 * c2)) * u.water_extra.y * 2.0 * shallow;
+    }
+
+    // Surface tint from the base water texture and the map's surface colour.
+    float3 surface = u.water_surface.rgb;
+    if (u.water_repeat.z > 0.5) {
+        surface *= water_tex.sample(wrap_s, in.uv * u.water_repeat.xy).rgb;
+    }
+    const float3 L = normalize(u.sun_dir.xyz);
+    const float lit = u.ambient.r * u.water_light.x + max(dot(N, L), 0.0) * u.water_light.y * 0.5;
+    float3 color = mix(refr, surface * lit, u.water_specular.w);
+
+    // Fresnel reflection of sky and terrain.
+    const float ndv = saturate(dot(N, V));
+    const float fresnel = saturate(u.water_fresnel.x +
+                                   (u.water_fresnel.y - u.water_fresnel.x) * pow(1.0 - ndv, u.water_fresnel.z));
+    if (u.water_extra.w > 0.5) {
+        float3 R = reflect(-V, N);
+        R.y = abs(R.y);
+        const float3 reflection = reflect_tex.sample(cube_s, R).rgb;
+        color = mix(color, reflection, fresnel);
+    }
+
+    // Sun specular.
+    const float3 H = normalize(L + V);
+    color += u.water_specular.rgb * u.water_light.z * pow(max(dot(N, H), 0.0), max(u.water_light.w, 1.0));
+
+    // Shore foam: bands travelling towards the beach plus a thin wash at the waterline.
+    if (u.water_shore.x > 0.5) {
+        const float shore = saturate(1.0 - depth / 20.0);
+        const float2 fuv = world.xz / 220.0 + slope * u.water_shore.w;
+        const float foam = (u.water_extra.z > 0.5 ? foam_tex.sample(wrap_s, fuv).r
+                                                  : wave_tex.sample(wrap_s, fuv).a);
+        const float band = 0.5 + 0.5 * sin(depth * u.water_shore.y * 6.0 + t * 1.6);
+        float amount = shore * shore * smoothstep(0.55, 0.95, band) * foam;
+        amount += pow(shore, 6.0) * foam * 0.8;
+        color = mix(color, float3(0.92, 0.96, 1.0), saturate(amount * u.water_shore.z));
+    }
+
+    // Soft waterline: fade to the plain seabed over the first elmo of depth.
+    color = mix(refr, color, saturate(depth));
+    return float4(color, 1.0);
 }
 
 // Free mex ring. gui_metalspots uses rgb (0, 1, 0.5) and fades the ring near alpha 0.5.

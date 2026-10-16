@@ -82,13 +82,30 @@ struct TerrainUniforms {
     float plane_color[4];
     // CBasicWater: xy texture repeats over the map (repeatX/Y or the default), z 1 with a texture.
     float water_repeat[4];
+    // Advanced water (water_fs). x fresnelMin, y fresnelMax, z fresnelPower, w reflectionDistortion.
+    float water_fresnel[4];
+    // x perlinStartFreq, y perlinLacunarity, z perlinAmplitude, w windSpeed.
+    float water_waves[4];
+    // x ambientFactor, y diffuseFactor, z specularFactor, w specularPower.
+    float water_light[4];
+    // specularColor (xyz), w surfaceAlpha.
+    float water_specular[4];
+    // surfaceColor (xyz), w time in seconds (sim frame / 30).
+    float water_surface[4];
+    // x shoreWaves, y waveLength, z waveFoamIntensity, w waveFoamDistortion.
+    float water_shore[4];
+    // x causticsResolution, y causticsStrength, z 1 with a foam texture, w 1 with a reflection cube.
+    float water_extra[4];
+    // 1 / target size (xy) for screen-space refraction lookups.
+    float water_screen[4];
 };
 
 // terrain_fs texture slots. Slot 2 is the shadow map.
 enum GroundSlot { kGroundDiffuse = 0, kGroundNormals = 1, kGroundSpecular = 3, kGroundSplatDistr = 4,
                   kGroundBlendNormals = 5, kGroundSplatNormal0 = 6, kGroundSlots = 10 };
 // Above the ground slots: atmosphere.skyBox cube and the $reflection cube (model_fs).
-enum { kSkyCubeSlot = 10, kReflectionSlot = 11, kWaterSlot = 12, kTextureSlots = 13 };
+enum { kSkyCubeSlot = 10, kReflectionSlot = 11, kWaterSlot = 12, kRefractColorSlot = 13, kRefractDepthSlot = 14,
+       kFoamSlot = 15, kWaveNormalSlot = 16, kCausticsSlot = 17, kTextureSlots = 18 };
 // Recoil CubeTexSizeReflection default; the oracle config does not set it, and BAR's
 // api_pbr_enabler only changes the config after the cubemap exists.
 constexpr NSUInteger kReflectionSize = 128;
@@ -145,6 +162,19 @@ struct TerrainRenderer::Impl {
     float plane_color[4] = {0, 0, 0, 0};
     id<MTLTexture> water_tex = nil;
     float water_repeat[4] = {0, 0, 0, 0};
+    // Advanced water: scene colour/depth copies for refraction, foam, procedural waves/caustics.
+    id<MTLTexture> refract_color = nil;
+    id<MTLTexture> refract_depth = nil;
+    id<MTLTexture> foam_tex = nil;
+    id<MTLTexture> wave_tex = nil;
+    id<MTLTexture> caustics_tex = nil;
+    float water_fresnel[4] = {0, 0, 0, 0};
+    float water_waves[4] = {0, 0, 0, 0};
+    float water_light[4] = {0, 0, 0, 0};
+    float water_specular[4] = {0, 0, 0, 0};
+    float water_surface[4] = {0, 0, 0, 0};
+    float water_shore[4] = {0, 0, 0, 0};
+    float water_extra[4] = {0, 0, 0, 0};
     id<MTLSamplerState> sampler = nil;
     id<MTLTexture> depth = nil;
     id<MTLTexture> offscreen = nil;
@@ -331,6 +361,11 @@ struct SceneBindings {
     id<MTLRenderPipelineState> sky_pipeline;
     id<MTLDepthStencilState> sky_depth;
     id<MTLTexture> water_tex;
+    id<MTLTexture> refract_color;
+    id<MTLTexture> refract_depth;
+    id<MTLTexture> foam_tex;
+    id<MTLTexture> wave_tex;
+    id<MTLTexture> caustics_tex;
     // ReadMap::HasVisibleWater (some ground below 0); BasicWater skips the draw otherwise.
     bool water_visible = false;
     id<MTLBuffer> pieces;
@@ -711,7 +746,7 @@ void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, i
     pass.colorAttachments[0].clearColor = clear;
     pass.depthAttachment.texture = depth;
     pass.depthAttachment.loadAction = MTLLoadActionClear;
-    pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+    pass.depthAttachment.storeAction = MTLStoreActionStore;
     pass.depthAttachment.clearDepth = 1.0;
 
     id<MTL4RenderCommandEncoder> encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
@@ -753,9 +788,48 @@ void encode_scene(id<MTL4CommandBuffer> command_buffer, id<MTLTexture> target, i
                       indexBufferLength:scene.model_indices.length];
     }
 
-    if (scene.water_visible) {
+    // Advanced water: copy the opaque scene (colour and depth) so the water pass can refract the
+    // seabed and measure water depth, then draw the surface in a second pass on top.
+    const bool water = scene.water_visible && scene.refract_color != nil && scene.refract_depth != nil &&
+                       scene.refract_color.width == target.width && scene.refract_color.height == target.height;
+    if (water) {
+        [encoder barrierAfterStages:MTLStageFragment
+                  beforeQueueStages:MTLStageBlit
+                  visibilityOptions:MTL4VisibilityOptionDevice];
+        [encoder endEncoding];
+        id<MTL4ComputeCommandEncoder> copy = [command_buffer computeCommandEncoder];
+        [copy copyFromTexture:target toTexture:scene.refract_color];
+        [copy copyFromTexture:depth toTexture:scene.refract_depth];
+        [copy barrierAfterStages:MTLStageBlit
+               beforeQueueStages:MTLStageFragment
+               visibilityOptions:MTL4VisibilityOptionDevice];
+        [copy endEncoding];
+
+        MTL4RenderPassDescriptor* water_pass = [MTL4RenderPassDescriptor new];
+        water_pass.colorAttachments[0].texture = target;
+        water_pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        water_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        water_pass.depthAttachment.texture = depth;
+        water_pass.depthAttachment.loadAction = MTLLoadActionLoad;
+        water_pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+        encoder = [command_buffer renderCommandEncoderWithDescriptor:water_pass];
+        [encoder setViewport:viewport];
+        [encoder setCullMode:MTLCullModeNone];
+        [encoder setFrontFacingWinding:MTLWindingClockwise];
+        [encoder setArgumentTable:scene.arguments atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+
         if (scene.water_tex != nil) {
             [scene.arguments setTexture:scene.water_tex.gpuResourceID atIndex:kWaterSlot];
+        }
+        [scene.arguments setTexture:scene.refract_color.gpuResourceID atIndex:kRefractColorSlot];
+        [scene.arguments setTexture:scene.refract_depth.gpuResourceID atIndex:kRefractDepthSlot];
+        [scene.arguments setTexture:(scene.foam_tex != nil ? scene.foam_tex : scene.wave_tex).gpuResourceID
+                            atIndex:kFoamSlot];
+        [scene.arguments setTexture:scene.wave_tex.gpuResourceID atIndex:kWaveNormalSlot];
+        [scene.arguments setTexture:scene.caustics_tex.gpuResourceID atIndex:kCausticsSlot];
+        id<MTLTexture> cube = scene.reflection != nil ? scene.reflection : scene.sky_cube;
+        if (cube != nil) {
+            [scene.arguments setTexture:cube.gpuResourceID atIndex:kReflectionSlot];
         }
         [scene.arguments setAddress:scene.water_vertices.gpuAddress atIndex:1];
         [encoder setRenderPipelineState:scene.water_pipeline];
@@ -1747,6 +1821,14 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
             impl_->water_repeat[1] = mesh.water.repeat_y != 0.f ? mesh.water.repeat_y : repeat_y;
             impl_->water_repeat[2] = 1.f;
         }
+        impl_->foam_tex = upload_image(impl_->device, textures.water_foam);
+        impl_->wave_tex = upload_image(impl_->device, textures.water_normals);
+        impl_->caustics_tex = upload_image(impl_->device, textures.water_caustics);
+        if (impl_->wave_tex == nil || impl_->caustics_tex == nil) {
+            error = "procedural water texture upload failed";
+            return false;
+        }
+        std::fprintf(stderr, "water foam: %s\n", impl_->foam_tex != nil ? "bitmaps/atmos/waterfoam.tga" : "none");
         std::fprintf(stderr, "water texture: %s %dx%d repeat %.3f %.3f\n", textures.water_path.c_str(),
                      textures.water.width, textures.water.height, impl_->water_repeat[0], impl_->water_repeat[1]);
         const bool splat = textures.splat_normal_count == 4 && textures.splat_distr.valid();
@@ -1810,6 +1892,24 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
     std::memcpy(impl_->water_base, mesh.water.base_color, sizeof(float) * 3);
     std::memcpy(impl_->water_min, mesh.water.min_color, sizeof(float) * 3);
     std::memcpy(impl_->water_absorb, mesh.water.absorb, sizeof(float) * 3);
+    {
+        const auto& w = mesh.water;
+        const float fresnel[4] = {w.fresnel_min, w.fresnel_max, w.fresnel_power, w.reflection_distortion};
+        const float waves[4] = {w.perlin_start_freq, w.perlin_lacunarity, w.perlin_amplitude, w.wind_speed};
+        const float light[4] = {w.ambient_factor, w.diffuse_factor, w.specular_factor, w.specular_power};
+        const float spec[4] = {w.specular_color[0], w.specular_color[1], w.specular_color[2], w.surface_alpha};
+        const float surf[4] = {w.surface_color[0], w.surface_color[1], w.surface_color[2], 0.f};
+        const float shore[4] = {w.shore_waves ? 1.f : 0.f, w.wave_length, w.wave_foam_intensity,
+                                w.wave_foam_distortion};
+        std::memcpy(impl_->water_fresnel, fresnel, sizeof(fresnel));
+        std::memcpy(impl_->water_waves, waves, sizeof(waves));
+        std::memcpy(impl_->water_light, light, sizeof(light));
+        std::memcpy(impl_->water_specular, spec, sizeof(spec));
+        std::memcpy(impl_->water_surface, surf, sizeof(surf));
+        std::memcpy(impl_->water_shore, shore, sizeof(shore));
+        impl_->water_extra[0] = w.caustics_resolution;
+        impl_->water_extra[1] = w.caustics_strength;
+    }
     std::memcpy(impl_->unit_ambient, mesh.unit_ambient, sizeof(float) * 3);
     std::memcpy(impl_->unit_diffuse, mesh.unit_diffuse, sizeof(float) * 3);
     std::memcpy(impl_->unit_specular, mesh.unit_specular, sizeof(float) * 3);
@@ -1881,6 +1981,11 @@ bool TerrainRenderer::init(const std::string& shader_path, const TerrainMesh& me
     [impl_->residency addAllocation:impl_->reflection_depth];
     if (impl_->sky_cube != nil) {
         [impl_->residency addAllocation:impl_->sky_cube];
+    }
+    for (id<MTLTexture> extra : {impl_->foam_tex, impl_->wave_tex, impl_->caustics_tex}) {
+        if (extra != nil) {
+            [impl_->residency addAllocation:extra];
+        }
     }
     if (impl_->water_tex != nil) {
         [impl_->residency addAllocation:impl_->water_tex];
@@ -2037,6 +2142,8 @@ void TerrainRenderer::attach(void* metal_layer) {
     }
     layer.device = impl_->device;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    // The water pass copies the drawable's opaque scene for refraction.
+    layer.framebufferOnly = NO;
     // Three drawables match the in-flight slots. The default is already 3; set it so a
     // later OS default cannot collapse the pool back to one.
     layer.maximumDrawableCount = kInFlight;
@@ -2054,6 +2161,8 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     }
     layer.device = impl_->device;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    // The water pass copies the drawable's opaque scene for refraction.
+    layer.framebufferOnly = NO;
     layer.maximumDrawableCount = kInFlight;
 
     const NSUInteger width = static_cast<NSUInteger>(layer.drawableSize.width);
@@ -2133,6 +2242,19 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     uniforms.unit_frame[2] = impl_->model_normal != nil ? 1.f : 0.f;
     std::memcpy(uniforms.plane_color, impl_->plane_color, sizeof(uniforms.plane_color));
     std::memcpy(uniforms.water_repeat, impl_->water_repeat, sizeof(uniforms.water_repeat));
+    std::memcpy(uniforms.water_fresnel, impl_->water_fresnel, sizeof(uniforms.water_fresnel));
+    std::memcpy(uniforms.water_waves, impl_->water_waves, sizeof(uniforms.water_waves));
+    std::memcpy(uniforms.water_light, impl_->water_light, sizeof(uniforms.water_light));
+    std::memcpy(uniforms.water_specular, impl_->water_specular, sizeof(uniforms.water_specular));
+    std::memcpy(uniforms.water_surface, impl_->water_surface, sizeof(uniforms.water_surface));
+    // Waves follow sim time so scripted runs are deterministic.
+    uniforms.water_surface[3] = static_cast<float>(frame.sim_frame) / 30.f;
+    std::memcpy(uniforms.water_shore, impl_->water_shore, sizeof(uniforms.water_shore));
+    std::memcpy(uniforms.water_extra, impl_->water_extra, sizeof(uniforms.water_extra));
+    uniforms.water_extra[2] = impl_->foam_tex != nil ? 1.f : 0.f;
+    uniforms.water_extra[3] = impl_->reflection != nil ? 1.f : 0.f;
+    uniforms.water_screen[0] = 1.f / static_cast<float>(width);
+    uniforms.water_screen[1] = 1.f / static_cast<float>(height);
     if (!invert4(uniforms.view_proj, uniforms.sky_inv)) {
         std::memset(uniforms.sky_inv, 0, sizeof(uniforms.sky_inv));
     }
@@ -2218,6 +2340,32 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
             return false;
         }
         [impl_->residency addAllocation:impl_->depth];
+        if (impl_->refract_color != nil) {
+            [impl_->residency removeAllocation:impl_->refract_color];
+            [impl_->residency removeAllocation:impl_->refract_depth];
+        }
+        MTLTextureDescriptor* refract_desc =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                               width:width
+                                                              height:height
+                                                           mipmapped:NO];
+        refract_desc.usage = MTLTextureUsageShaderRead;
+        refract_desc.storageMode = MTLStorageModePrivate;
+        impl_->refract_color = [impl_->device newTextureWithDescriptor:refract_desc];
+        MTLTextureDescriptor* refract_depth_desc =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                               width:width
+                                                              height:height
+                                                           mipmapped:NO];
+        refract_depth_desc.usage = MTLTextureUsageShaderRead;
+        refract_depth_desc.storageMode = MTLStorageModePrivate;
+        impl_->refract_depth = [impl_->device newTextureWithDescriptor:refract_depth_desc];
+        if (impl_->refract_color == nil || impl_->refract_depth == nil) {
+            error = "water refraction texture allocation failed";
+            return false;
+        }
+        [impl_->residency addAllocation:impl_->refract_color];
+        [impl_->residency addAllocation:impl_->refract_depth];
         impl_->target_width = width;
         impl_->target_height = height;
     }
@@ -2295,6 +2443,11 @@ bool TerrainRenderer::draw(const TerrainFrame& frame, std::string& error) {
     scene.sky_pipeline = impl_->sky_pipeline;
     scene.sky_depth = impl_->sky_depth;
     scene.water_tex = impl_->water_tex;
+    scene.refract_color = impl_->refract_color;
+    scene.refract_depth = impl_->refract_depth;
+    scene.foam_tex = impl_->foam_tex;
+    scene.wave_tex = impl_->wave_tex;
+    scene.caustics_tex = impl_->caustics_tex;
     scene.water_visible = impl_->map[2] > 0.5f;
     scene.pieces = slot.pieces;
     scene.shadow_map = impl_->shadow_map;

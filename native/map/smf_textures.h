@@ -40,6 +40,11 @@ struct TerrainTextures {
     // under bitmaps/ (Recoil default "ocean.jpg"). RGBA8 with a box-filtered mip chain.
     GpuImage water;
     std::string water_path;
+    // Advanced water: bitmaps/atmos/waterfoam.tga from the game install (loaded in place),
+    // and procedurally generated wave normals and caustics.
+    GpuImage water_foam;
+    GpuImage water_normals;
+    GpuImage water_caustics;
 };
 
 bool load_terrain_textures(const TerrainMesh& mesh, TerrainTextures& out, std::string& error);

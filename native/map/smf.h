@@ -112,6 +112,29 @@ struct TerrainMesh {
         float surface_color[3] = {0.75f, 0.8f, 0.85f};
         float surface_alpha = 0.55f;
         std::string texture;
+        // Advanced-water look parameters (mapinfo water table). Defaults for keys the map
+        // omits are our own choices, picked to give a neutral look.
+        float ambient_factor = 1.0f;
+        float diffuse_factor = 1.0f;
+        float specular_factor = 1.0f;
+        float specular_power = 20.0f;
+        float diffuse_color[3] = {1.f, 1.f, 1.f};
+        float specular_color[3] = {0.5f, 0.5f, 0.5f};
+        float fresnel_min = 0.2f;
+        float fresnel_max = 0.8f;
+        float fresnel_power = 4.0f;
+        float reflection_distortion = 1.0f;
+        float perlin_start_freq = 8.0f;
+        float perlin_lacunarity = 3.0f;
+        float perlin_amplitude = 0.9f;
+        float wind_speed = 1.0f;
+        bool shore_waves = true;
+        float caustics_resolution = 75.0f;
+        float caustics_strength = 0.08f;
+        float wave_offset_factor = 0.0f;
+        float wave_length = 0.15f;
+        float wave_foam_distortion = 0.05f;
+        float wave_foam_intensity = 0.5f;
     } water;
 };
 
