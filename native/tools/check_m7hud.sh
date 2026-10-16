@@ -82,6 +82,21 @@ for name in ("hud.ppm", "hud-end.ppm"):
                   if rgb[px_i] > 200 and rgb[px_i + 1] < 40 and rgb[px_i + 2] > 200)
     assert magenta == 0, (name, magenta)
 
+# Top resource bar text on the end frame only (mid-run --screenshot is before DrawScreen text).
+w, h, rgb = load_ppm(out / "hud-end.ppm")
+topbar_text = 0
+y0 = h - max(8, int(h * 0.09))
+for y in range(y0, h):
+    for x in range(int(w * 0.22), int(w * 0.78)):
+        r, g, b = px(rgb, w, h, x, y)
+        bright = max(r, g, b)
+        if bright < 130:
+            continue
+        if abs(r - g) < 10 and abs(g - b) < 10 and bright < 160:
+            continue
+        topbar_text += 1
+assert topbar_text >= 40, ("hud-end.ppm", "missing top bar text pixels", topbar_text)
+
 w, h, rgb = load_ppm(out / "hud-end.ppm")
 ux, uy = 640.0, 371.0
 

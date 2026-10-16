@@ -84,6 +84,20 @@ for y in range(h - msy, h):
             marker_hits += 1
 assert marker_hits >= 8, ("no minimap unit marker", marker_hits, msx, msy)
 
+# 1b) Top bar resource / wind text must be visible (CoreText color-run regression guard).
+topbar_text = 0
+y0 = h - max(8, int(h * 0.09))
+for y in range(y0, h):
+    for x in range(int(w * 0.22), int(w * 0.78)):
+        r, g, b = px(rgb, w, h, x, y)
+        bright = max(r, g, b)
+        if bright < 130:
+            continue
+        if abs(r - g) < 10 and abs(g - b) < 10 and bright < 160:
+            continue
+        topbar_text += 1
+assert topbar_text >= 40, ("missing top bar text pixels", topbar_text)
+
 # 2) No oversized top-bar rectangle: contiguous grey under the pods must stay
 #    within a thin strip (topbar is ~vsy*0.0425 ≈ 78px at 1846).
 top_flat = 0

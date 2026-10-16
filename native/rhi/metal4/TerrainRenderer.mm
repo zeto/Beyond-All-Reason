@@ -409,46 +409,42 @@ CFStringRef cfstring_lossy(const std::string& text) {
 }
 
 // Spring \255RGB applies a mid-string color; \008 resets to the Print base color.
-// Build one CTLine with per-run foreground colors (do not strip to a single tint).
+// Strip codes into plain UTF-8, record (start,len,rgba) runs, then one attributed string.
 CTLineRef hud_line(CTFontRef font, const std::string& text, float r, float g, float b, float a) {
-    CFMutableAttributedStringRef attr = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0);
-    if (attr == nullptr) {
-        return nullptr;
-    }
+    struct ColorRun {
+        CFIndex start = 0;
+        CFIndex len = 0;
+        float r = 1;
+        float g = 1;
+        float b = 1;
+        float a = 1;
+    };
+    std::string plain;
+    plain.reserve(text.size());
+    std::vector<ColorRun> runs;
     float cr = r;
     float cg = g;
     float cb = b;
     float ca = a;
-    std::string run;
-    run.reserve(text.size());
-    auto flush = [&]() {
-        if (run.empty()) {
-            return;
-        }
-        CFStringRef chars = cfstring_lossy(run);
-        run.clear();
-        if (chars == nullptr) {
-            return;
-        }
-        const CFIndex start = CFAttributedStringGetLength(attr);
-        CFAttributedStringReplaceString(attr, CFRangeMake(start, 0), chars);
-        const CFIndex len = CFStringGetLength(chars);
-        CFRelease(chars);
-        if (len <= 0) {
-            return;
-        }
-        const CFRange range = CFRangeMake(start, len);
-        CFAttributedStringSetAttribute(attr, range, kCTFontAttributeName, font);
-        CGColorRef color = CGColorCreateGenericRGB(cr, cg, cb, ca);
-        if (color != nullptr) {
-            CFAttributedStringSetAttribute(attr, range, kCTForegroundColorAttributeName, color);
-            CGColorRelease(color);
+    CFIndex run_start = 0;
+    auto close_run = [&]() {
+        const CFIndex end = static_cast<CFIndex>(plain.size());
+        if (end > run_start) {
+            ColorRun run;
+            run.start = run_start;
+            run.len = end - run_start;
+            run.r = cr;
+            run.g = cg;
+            run.b = cb;
+            run.a = ca;
+            runs.push_back(run);
+            run_start = end;
         }
     };
     for (size_t i = 0; i < text.size();) {
         const unsigned char c = static_cast<unsigned char>(text[i]);
         if (c == 255 && i + 3 < text.size()) {
-            flush();
+            close_run();
             cr = static_cast<unsigned char>(text[i + 1]) / 255.f;
             cg = static_cast<unsigned char>(text[i + 2]) / 255.f;
             cb = static_cast<unsigned char>(text[i + 3]) / 255.f;
@@ -457,8 +453,7 @@ CTLineRef hud_line(CTFontRef font, const std::string& text, float r, float g, fl
             continue;
         }
         if (c == 8) {
-            flush();
-            // Reset to the font Print color (Spring ColorReset → defaultColor).
+            close_run();
             cr = r;
             cg = g;
             cb = b;
@@ -466,14 +461,63 @@ CTLineRef hud_line(CTFontRef font, const std::string& text, float r, float g, fl
             ++i;
             continue;
         }
-        run.push_back(static_cast<char>(c));
+        plain.push_back(static_cast<char>(c));
         ++i;
     }
-    flush();
-    CTLineRef line = nullptr;
-    if (CFAttributedStringGetLength(attr) > 0) {
-        line = CTLineCreateWithAttributedString(attr);
+    close_run();
+    if (plain.empty()) {
+        return nullptr;
     }
+    CFStringRef chars = cfstring_lossy(plain);
+    if (chars == nullptr) {
+        return nullptr;
+    }
+    // DeviceRGB matches the bitmap context; GenericRGB has produced invisible glyphs.
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGFloat base_components[4] = {r, g, b, a};
+    CGColorRef base_color =
+        space != nullptr ? CGColorCreate(space, base_components) : CGColorCreateGenericRGB(r, g, b, a);
+    const void* keys[] = {kCTFontAttributeName, kCTForegroundColorAttributeName};
+    const void* values[] = {font, base_color};
+    CFDictionaryRef attrs = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 2, &kCFTypeDictionaryKeyCallBacks,
+                                               &kCFTypeDictionaryValueCallBacks);
+    CFMutableAttributedStringRef attr = nullptr;
+    if (attrs != nullptr) {
+        CFAttributedStringRef base = CFAttributedStringCreate(kCFAllocatorDefault, chars, attrs);
+        if (base != nullptr) {
+            attr = CFAttributedStringCreateMutableCopy(kCFAllocatorDefault, 0, base);
+            CFRelease(base);
+        }
+        CFRelease(attrs);
+    }
+    CFRelease(chars);
+    if (base_color != nullptr) {
+        CGColorRelease(base_color);
+    }
+    if (attr == nullptr) {
+        if (space != nullptr) {
+            CGColorSpaceRelease(space);
+        }
+        return nullptr;
+    }
+    // CFString length is UTF-16; plain ASCII/Latin runs match byte length from cfstring_lossy.
+    for (const ColorRun& run : runs) {
+        if (run.len <= 0) {
+            continue;
+        }
+        CGFloat components[4] = {run.r, run.g, run.b, run.a};
+        CGColorRef color =
+            space != nullptr ? CGColorCreate(space, components) : CGColorCreateGenericRGB(run.r, run.g, run.b, run.a);
+        if (color == nullptr) {
+            continue;
+        }
+        CFAttributedStringSetAttribute(attr, CFRangeMake(run.start, run.len), kCTForegroundColorAttributeName, color);
+        CGColorRelease(color);
+    }
+    if (space != nullptr) {
+        CGColorSpaceRelease(space);
+    }
+    CTLineRef line = CTLineCreateWithAttributedString(attr);
     CFRelease(attr);
     return line;
 }
@@ -1451,8 +1495,42 @@ bool check_hud_text(std::string& error) {
             error = std::string("hud text empty bitmap: ") + c.label;
             return false;
         }
+        // Colored / plain rasters must leave visible premul coverage (regression: invisible glyphs).
+        size_t lit = 0;
+        for (size_t i = 0; i + 3 < image.pixels.size(); i += 4) {
+            if (image.pixels[i + 3] > 8) {
+                ++lit;
+            }
+        }
+        if (lit < 4) {
+            error = std::string("hud text invisible bitmap: ") + c.label;
+            return false;
+        }
     }
     return true;
+}
+
+float hud_measure_width(const std::string& text, const std::string& font_path, float size) {
+    if (text.empty()) {
+        return 0.f;
+    }
+    const float px = size < 4.f ? 4.f : (size > 256.f ? 256.f : size);
+    CTFontRef font = hud_font(font_path, px);
+    if (font == nullptr) {
+        return 0.f;
+    }
+    // Advance is independent of color; white base is fine.
+    CTLineRef line = hud_line(font, text, 1.f, 1.f, 1.f, 1.f);
+    CFRelease(font);
+    if (line == nullptr) {
+        return 0.f;
+    }
+    CGFloat ascent = 0;
+    CGFloat descent = 0;
+    CGFloat leading = 0;
+    const double advance = CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
+    CFRelease(line);
+    return static_cast<float>(advance);
 }
 
 

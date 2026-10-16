@@ -53,4 +53,7 @@ private:
 // Returns false only if rasterization fails (must not SIGSEGV).
 bool check_hud_text(std::string& error);
 
+// CoreText advance for Spring HUD text (color codes stripped). size is pixel height.
+float hud_measure_width(const std::string& text, const std::string& font_path, float size);
+
 }  // namespace bar

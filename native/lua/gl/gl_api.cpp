@@ -1,4 +1,5 @@
 #include "gl/gl_api.h"
+#include "terrain_renderer.h"
 
 extern "C" {
 #include "lauxlib.h"
@@ -972,12 +973,12 @@ int font_set_outline(lua_State* state) {
 int font_width(lua_State* state) {
     size_t length = 0;
     const char* raw = lua_tolstring(state, 2, &length);
-    float r = 1;
-    float gch = 1;
-    float b = 1;
-    float a = 1;
-    const std::string visible = raw != nullptr ? visible_text(raw, length, r, gch, b, a) : std::string();
-    lua_pushnumber(state, 0.5 * static_cast<double>(visible.size()));
+    const float px = field_num(state, 1, "px", 16);
+    const std::string path = font_file(state, 1);
+    const std::string payload = raw != nullptr ? std::string(raw, length) : std::string();
+    // CoreText advance; Spring color codes are stripped inside hud_line.
+    const float advance = hud_measure_width(payload, path, px);
+    lua_pushnumber(state, static_cast<double>(advance));
     return 1;
 }
 
