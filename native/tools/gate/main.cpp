@@ -8809,6 +8809,432 @@ int gate_pve(const Options& options) {
     return 0;
 }
 
+
+int count_magenta(const std::vector<uint8_t>& rgb) {
+    int count = 0;
+    for (size_t i = 0; i + 2 < rgb.size(); i += 3) {
+        if (rgb[i] > 200 && rgb[i + 1] < 40 && rgb[i + 2] > 200) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+void ppm_pixel(const std::vector<uint8_t>& rgb, int w, int h, int x, int y, int& r, int& g, int& b) {
+    x = std::max(0, std::min(w - 1, x));
+    // Engine shots store row 0 at the top; OpenGL y grows up.
+    const int sy = h - 1 - std::max(0, std::min(h - 1, y));
+    const size_t o = static_cast<size_t>((sy * w + x) * 3);
+    r = rgb[o];
+    g = rgb[o + 1];
+    b = rgb[o + 2];
+}
+
+bool log_has(const std::string& log, const char* needle) { return log.find(needle) != std::string::npos; }
+
+int gate_m7(const Options& options) {
+    // Self-only: no Recoil HUD/oracle traces exist for M7. Checks bar-metal outs from
+    // check_m7select/build/minimap/hud/window under native/oracle/out/m7*.
+    const std::string tolerance_path = options.oracle + "/tolerances.toml";
+    std::string tolerance_text;
+    double build_x = 0, build_z = 0, build_slop = 0;
+    double mmap_x = 0, mmap_z = 0, mmap_slop = 0;
+    double health_frac = 0, health_slop = 0, range = 0, range_slop = 0;
+    double topbar_text_min = 0, wind_lit_min = 0, counter_lit_min = 0, income_colored_min = 0;
+    double ring_min = 0, ring_max = 0, ring_width = 0, ring_med = 0, tip_hits_min = 0;
+    double retina_w = 0, retina_h = 0, topbar_frac = 0, stable_diff = 0;
+    if (!read_text(tolerance_path, tolerance_text) || !toml_number(tolerance_text, "m7_build_x", build_x) ||
+        !toml_number(tolerance_text, "m7_build_z", build_z) || !toml_number(tolerance_text, "m7_build_slop", build_slop) ||
+        !toml_number(tolerance_text, "m7_mmap_x", mmap_x) || !toml_number(tolerance_text, "m7_mmap_z", mmap_z) ||
+        !toml_number(tolerance_text, "m7_mmap_slop", mmap_slop) ||
+        !toml_number(tolerance_text, "m7_health_frac", health_frac) ||
+        !toml_number(tolerance_text, "m7_health_slop", health_slop) || !toml_number(tolerance_text, "m7_range", range) ||
+        !toml_number(tolerance_text, "m7_range_slop", range_slop) ||
+        !toml_number(tolerance_text, "m7_topbar_text", topbar_text_min) ||
+        !toml_number(tolerance_text, "m7_wind_lit", wind_lit_min) ||
+        !toml_number(tolerance_text, "m7_counter_lit", counter_lit_min) ||
+        !toml_number(tolerance_text, "m7_income_colored", income_colored_min) ||
+        !toml_number(tolerance_text, "m7_ring_min", ring_min) || !toml_number(tolerance_text, "m7_ring_max", ring_max) ||
+        !toml_number(tolerance_text, "m7_ring_width", ring_width) ||
+        !toml_number(tolerance_text, "m7_ring_med", ring_med) ||
+        !toml_number(tolerance_text, "m7_tip_hits", tip_hits_min) ||
+        !toml_number(tolerance_text, "m7_retina_w", retina_w) || !toml_number(tolerance_text, "m7_retina_h", retina_h) ||
+        !toml_number(tolerance_text, "m7_topbar_frac", topbar_frac) ||
+        !toml_number(tolerance_text, "m7_stable_diff", stable_diff)) {
+        std::cerr << "gate: m7 tolerances are missing\n";
+        return 2;
+    }
+
+    std::ostringstream failure;
+    failure << "# m7 hud\n\n";
+    failure << "Scenario: m7select / m7build / m7minimap / m7hud / m7window\n\n";
+    failure << "Entity: Armada commander HUD on Supreme Isthmus\n\n";
+    failure << "Field: selection, build menu, minimap move, health/range/tooltip, Retina top bar\n\n";
+    failure << "Self-only: no Recoil HUD/oracle trace is pinned for M7. This suite scores engine "
+               "JSON and framebuffer shots from the check_m7* runs.\n\n";
+
+    auto fail_write = [&](int code) {
+        std::ofstream packet(options.oracle + "/last_failure.md");
+        packet << failure.str();
+        return code;
+    };
+
+    // --- selection ---
+    std::string select_txt, select_log;
+    const bool select_ok = read_text(options.actual + "/m7select/select.json", select_txt) &&
+                           read_text(options.actual + "/m7select/run.log", select_log);
+    std::string cursor;
+    double cmd = -1;
+    const bool cursor_ok = select_ok && json_string_field(select_txt, "cursor", cursor) && cursor == "cursormove";
+    const bool cmd_ok = select_ok && json_number_field(select_txt, "cmd", cmd) && static_cast<int>(cmd) == 10;
+    const bool sel_ok = select_ok && (select_txt.find("\"sel\":[1]") != std::string::npos ||
+                                  select_txt.find("\"sel\": [1]") != std::string::npos);
+    const bool select_log_ok =
+        select_ok && log_has(select_log, "select box") && log_has(select_log, "ids 1") &&
+        log_has(select_log, "order move 8000 4900 unit 1");
+    double sim_x = 0;
+    {
+        const auto at = select_log.find("sim frame 60 at ");
+        if (at != std::string::npos) {
+            sim_x = std::strtod(select_log.c_str() + at + 16, nullptr);
+        }
+    }
+    const bool moved_ok = sim_x > 7605.0;
+    std::cout << "select cursor " << cursor << " cmd " << static_cast<int>(cmd) << " sel "
+              << (sel_ok ? "[1]" : "?") << " sim_x " << sim_x << "\n";
+    if (!select_ok || !cursor_ok || !cmd_ok || !sel_ok || !select_log_ok || !moved_ok) {
+        failure << "Selection failed. Need cursormove, cmd 10, sel [1], move to 8000 4900, sim_x > 7605.\n\n";
+        std::cout << "m7 FAIL select\n";
+        return fail_write(1);
+    }
+
+    // --- build ---
+    std::string build_txt, build_log;
+    const bool build_ok = read_text(options.actual + "/m7build/build.json", build_txt) &&
+                          read_text(options.actual + "/m7build/run.log", build_log);
+    std::string build_def;
+    double bcmd = 0, bx = 0, bz = 0, placing = 0, building = 0, building_now = 0, start_unit = 0;
+    const bool def_ok = build_ok && json_string_field(build_txt, "def", build_def) && build_def == "armmex";
+    const bool bcmd_ok = build_ok && json_number_field(build_txt, "cmd", bcmd) && static_cast<int>(bcmd) == -13;
+    const bool place_ok = build_ok && json_number_field(build_txt, "placing", placing) && static_cast<int>(placing) == 1;
+    const bool bxz_ok = build_ok && json_number_field(build_txt, "x", bx) && json_number_field(build_txt, "z", bz) &&
+                        std::fabs(bx - build_x) <= build_slop && std::fabs(bz - build_z) <= build_slop;
+    const bool nano_ok = build_ok && json_number_field(build_txt, "building", building) &&
+                         json_number_field(build_txt, "buildingNow", building_now) && building > 0 &&
+                         static_cast<int>(building) == static_cast<int>(building_now);
+    const bool start_ok = build_ok && json_number_field(build_txt, "startUnit", start_unit) && start_unit > 0;
+    const bool build_log_ok = build_ok && log_has(build_log, "player build armmex unit 1 at 7416 4888") &&
+                              log_has(build_log, "build pick armmex");
+    std::cout << "build " << build_def << " at " << bx << " " << bz << " nano " << static_cast<int>(building) << "\n";
+    if (!build_ok || !def_ok || !bcmd_ok || !place_ok || !bxz_ok || !nano_ok || !start_ok || !build_log_ok) {
+        failure << "Build failed. Need armmex cmd -13 at " << build_x << "," << build_z << " with nano id.\n\n";
+        std::cout << "m7 FAIL build\n";
+        return fail_write(1);
+    }
+
+    // --- minimap ---
+    std::string mmap_txt, mmap_log;
+    const bool mmap_ok = read_text(options.actual + "/m7minimap/minimap.json", mmap_txt) &&
+                         read_text(options.actual + "/m7minimap/run.log", mmap_log);
+    double sx = 0, sy = 0, minimized = 1, slave = 0, moved = 0, wx = 0, wz = 0;
+    const bool geo_ok = mmap_ok && json_number_field(mmap_txt, "sx", sx) && json_number_field(mmap_txt, "sy", sy) &&
+                        sx > 100 && sy > 100 && json_number_field(mmap_txt, "minimized", minimized) &&
+                        static_cast<int>(minimized) == 0 && json_number_field(mmap_txt, "slave", slave) &&
+                        static_cast<int>(slave) == 1;
+    const bool move_ok = mmap_ok && json_number_field(mmap_txt, "moved", moved) && static_cast<int>(moved) == 1 &&
+                         json_number_field(mmap_txt, "worldX", wx) && json_number_field(mmap_txt, "worldZ", wz) &&
+                         std::fabs(wx - mmap_x) <= mmap_slop && std::fabs(wz - mmap_z) <= mmap_slop;
+    const bool mmap_log_ok = mmap_ok && log_has(mmap_log, "minimap click") && log_has(mmap_log, "order move");
+    std::cout << "minimap " << static_cast<int>(sx) << "x" << static_cast<int>(sy) << " world " << wx << " " << wz
+              << "\n";
+    if (!mmap_ok || !geo_ok || !move_ok || !mmap_log_ok) {
+        failure << "Minimap failed. Need slave geometry and click near " << mmap_x << "," << mmap_z << ".\n\n";
+        std::cout << "m7 FAIL minimap\n";
+        return fail_write(1);
+    }
+
+    // --- hud status ---
+    std::string hud_txt, hud_log, hud_text_log;
+    const bool hud_ok = read_text(options.actual + "/m7hud/hud.json", hud_txt) &&
+                        read_text(options.actual + "/m7hud/run.log", hud_log) &&
+                        read_text(options.actual + "/m7hud/hud-text.log", hud_text_log);
+    double hover = 0, health = 0, max_health = 0, hud_range = 0, bar_frac = 0;
+    std::string tip;
+    const bool tip_ok = hud_ok && json_number_field(hud_txt, "hover", hover) && static_cast<int>(hover) == 1 &&
+                        json_string_field(hud_txt, "tooltip", tip) && tip == "armcom";
+    const bool hp_ok = hud_ok && json_number_field(hud_txt, "health", health) &&
+                       json_number_field(hud_txt, "maxHealth", max_health) && max_health > 100 &&
+                       std::fabs(health - health_frac * max_health) <= health_slop;
+    const bool range_ok =
+        hud_ok && json_number_field(hud_txt, "range", hud_range) && std::fabs(hud_range - range) <= range_slop;
+    const bool frac_ok =
+        hud_ok && json_number_field(hud_txt, "barFrac", bar_frac) && std::fabs(bar_frac - health_frac) < 0.05;
+    const bool hud_log_ok = hud_ok && log_has(hud_log, "hud hover unit 1 tooltip armcom") &&
+                            log_has(hud_log, "hud damage unit 1 hp ") &&
+                            hud_log.find("tooltip DrawScreen:") == std::string::npos &&
+                            log_has(hud_text_log, "check-hud-text ok");
+    std::cout << "hud tip " << tip << " hp " << health << "/" << max_health << " range " << hud_range << "\n";
+    if (!hud_ok || !tip_ok || !hp_ok || !range_ok || !frac_ok || !hud_log_ok) {
+        failure << "HUD status failed. Need armcom tip, half health, range " << range << ".\n\n";
+        std::cout << "m7 FAIL hud\n";
+        return fail_write(1);
+    }
+
+    // --- hud-end.ppm pixels (top bar, ring, tip, magenta) ---
+    int hw = 0, hh = 0;
+    std::vector<uint8_t> hrgb;
+    std::string himg_err;
+    const std::string hend = options.actual + "/m7hud/hud-end.ppm";
+    if (!read_ppm(hend, hw, hh, hrgb, himg_err) || hw != 1280 || hh != 720) {
+        failure << "hud-end.ppm missing or wrong size: " << himg_err << "\n\n";
+        std::cout << "m7 FAIL hud-shot\n";
+        return fail_write(1);
+    }
+    if (count_magenta(hrgb) != 0) {
+        failure << "hud-end.ppm has magenta missing-texture pixels.\n\n";
+        std::cout << "m7 FAIL magenta\n";
+        return fail_write(1);
+    }
+    int topbar_text = 0, wind_lit = 0, counter_lit = 0, income_colored = 0, income_edge = 0;
+    const int y0 = hh - std::max(8, static_cast<int>(hh * 0.09));
+    for (int y = y0; y < hh; ++y) {
+        for (int x = static_cast<int>(hw * 0.22); x < static_cast<int>(hw * 0.78); ++x) {
+            int r = 0, g = 0, b = 0;
+            ppm_pixel(hrgb, hw, hh, x, y, r, g, b);
+            const int bright = std::max(r, std::max(g, b));
+            if (bright < 130) {
+                continue;
+            }
+            if (std::abs(r - g) < 10 && std::abs(g - b) < 10 && bright < 160) {
+                continue;
+            }
+            ++topbar_text;
+        }
+        for (int x = static_cast<int>(hw * 0.55); x < static_cast<int>(hw * 0.68); ++x) {
+            int r = 0, g = 0, b = 0;
+            ppm_pixel(hrgb, hw, hh, x, y, r, g, b);
+            const int bright = std::max(r, std::max(g, b));
+            if (bright >= 160 && !(std::abs(r - g) < 10 && std::abs(g - b) < 10 && bright < 180)) {
+                ++wind_lit;
+            }
+        }
+        for (int x = static_cast<int>(hw * 0.66); x < static_cast<int>(hw * 0.80); ++x) {
+            int r = 0, g = 0, b = 0;
+            ppm_pixel(hrgb, hw, hh, x, y, r, g, b);
+            const int bright = std::max(r, std::max(g, b));
+            if (bright >= 160 && !(std::abs(r - g) < 10 && std::abs(g - b) < 10 && bright < 180)) {
+                ++counter_lit;
+            }
+        }
+        for (int x = static_cast<int>(hw * 0.28); x < static_cast<int>(hw * 0.52); ++x) {
+            int r = 0, g = 0, b = 0;
+            ppm_pixel(hrgb, hw, hh, x, y, r, g, b);
+            const int bright = std::max(r, std::max(g, b));
+            if (bright < 100) {
+                continue;
+            }
+            const bool colored = (g > r + 25 && g > b + 20) || (r > g + 25 && r > b + 20);
+            if (!colored) {
+                continue;
+            }
+            ++income_colored;
+            const int nbs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+            for (const auto& nb : nbs) {
+                int rr = 0, gg = 0, bb = 0;
+                ppm_pixel(hrgb, hw, hh, x + nb[0], y + nb[1], rr, gg, bb);
+                if (bright - std::max(rr, std::max(gg, bb)) > 45) {
+                    ++income_edge;
+                    break;
+                }
+            }
+        }
+    }
+    std::cout << "topbar_text " << topbar_text << " wind " << wind_lit << " counter " << counter_lit << " income "
+              << income_colored << "/" << income_edge << "\n";
+    if (topbar_text < static_cast<int>(topbar_text_min) || wind_lit < static_cast<int>(wind_lit_min) ||
+        counter_lit < static_cast<int>(counter_lit_min) || income_colored < static_cast<int>(income_colored_min) ||
+        income_edge * 2 < income_colored) {
+        failure << "Top bar text failed. topbar=" << topbar_text << " wind=" << wind_lit << " counter=" << counter_lit
+                << " income=" << income_colored << " edge=" << income_edge << "\n\n";
+        std::cout << "m7 FAIL topbar\n";
+        return fail_write(1);
+    }
+
+    // Range ring: orange spread
+    std::vector<std::pair<int, int>> orange;
+    for (int y = 0; y < hh; ++y) {
+        for (int x = 0; x < hw; ++x) {
+            const size_t o = static_cast<size_t>((y * hw + x) * 3);
+            const int r = hrgb[o], g = hrgb[o + 1], b = hrgb[o + 2];
+            if (r > 140 && g < 120 && b < 100 && r > g + 30 && r > b + 40) {
+                orange.push_back({x, hh - 1 - y});
+            }
+        }
+    }
+    int minx = hw, maxx = 0;
+    std::vector<double> dists;
+    dists.reserve(orange.size());
+    const double ux = 640.0, uy = 371.0;
+    for (const auto& p : orange) {
+        minx = std::min(minx, p.first);
+        maxx = std::max(maxx, p.first);
+        dists.push_back(std::hypot(p.first - ux, p.second - uy));
+    }
+    std::sort(dists.begin(), dists.end());
+    const double med = dists.empty() ? 0.0 : dists[dists.size() / 2];
+    std::cout << "ring orange " << orange.size() << " width " << (maxx - minx) << " med " << med << "\n";
+    if (static_cast<int>(orange.size()) < static_cast<int>(ring_min) ||
+        static_cast<int>(orange.size()) > static_cast<int>(ring_max) || (maxx - minx) <= static_cast<int>(ring_width) ||
+        med <= ring_med) {
+        failure << "Range ring failed. count=" << orange.size() << " width=" << (maxx - minx) << " med=" << med
+                << "\n\n";
+        std::cout << "m7 FAIL ring\n";
+        return fail_write(1);
+    }
+
+    // Tooltip text near cursor
+    double hx = 640, hy = 360;
+    json_number_field(hud_txt, "hoverX", hx);
+    json_number_field(hud_txt, "hoverY", hy);
+    int tip_hits = 0;
+    for (int y = static_cast<int>(hy - 40); y < static_cast<int>(hy + 100); ++y) {
+        for (int x = static_cast<int>(hx - 40); x < static_cast<int>(hx + 280); ++x) {
+            if (x < 0 || y < 0 || x >= hw || y >= hh) {
+                continue;
+            }
+            int r = 0, g = 0, b = 0;
+            ppm_pixel(hrgb, hw, hh, x, y, r, g, b);
+            if ((r > 180 && g > 180 && b > 170) || (r > 160 && g > 200 && b > 160)) {
+                ++tip_hits;
+            }
+        }
+    }
+    std::cout << "tooltip pixels " << tip_hits << "\n";
+    if (tip_hits < static_cast<int>(tip_hits_min)) {
+        failure << "Tooltip text pixels near cursor: " << tip_hits << "\n\n";
+        std::cout << "m7 FAIL tooltip\n";
+        return fail_write(1);
+    }
+
+    // --- Retina window ---
+    std::string win_log;
+    if (!read_text(options.actual + "/m7window/run.log", win_log)) {
+        failure << "m7window/run.log missing.\n\n";
+        std::cout << "m7 FAIL window-log\n";
+        return fail_write(1);
+    }
+    int dw = 0, dh = 0;
+    {
+        const auto at = win_log.find("drawable: ");
+        if (at != std::string::npos) {
+            std::sscanf(win_log.c_str() + at + 10, "%dx%d", &dw, &dh);
+        }
+    }
+    std::cout << "drawable " << dw << "x" << dh << "\n";
+    if (dw < static_cast<int>(retina_w) || dh < static_cast<int>(retina_h) ||
+        win_log.find("attempt to perform arithmetic on local") != std::string::npos ||
+        win_log.find("widgets view ") == std::string::npos || win_log.find("select box") == std::string::npos) {
+        failure << "Retina window failed. drawable " << dw << "x" << dh << "\n\n";
+        std::cout << "m7 FAIL window\n";
+        return fail_write(1);
+    }
+    int ww = 0, wh = 0;
+    std::vector<uint8_t> wrgb;
+    std::string werr;
+    if (!read_ppm(options.actual + "/m7window/window-end.ppm", ww, wh, wrgb, werr) || ww != dw || wh != dh) {
+        failure << "window-end.ppm missing or size mismatch: " << werr << "\n\n";
+        std::cout << "m7 FAIL window-shot\n";
+        return fail_write(1);
+    }
+    if (count_magenta(wrgb) != 0) {
+        failure << "window-end.ppm has magenta pixels.\n\n";
+        std::cout << "m7 FAIL window-magenta\n";
+        return fail_write(1);
+    }
+    // Minimap marker green-ish in top-left panel
+    int marker_hits = 0;
+    double msx = 200, msy = 200;
+    {
+        std::string mj;
+        if (read_text(options.actual + "/m7window/minimap.json", mj)) {
+            json_number_field(mj, "sx", msx);
+            json_number_field(mj, "sy", msy);
+        }
+    }
+    for (int y = wh - static_cast<int>(msy); y < wh; ++y) {
+        for (int x = 0; x < static_cast<int>(msx); ++x) {
+            int r = 0, g = 0, b = 0;
+            ppm_pixel(wrgb, ww, wh, x, y, r, g, b);
+            if (g > 140 && g > r + 20 && g > b + 20) {
+                ++marker_hits;
+            }
+        }
+    }
+    int w_topbar = 0;
+    const int wy0 = wh - std::max(8, static_cast<int>(wh * 0.09));
+    for (int y = wy0; y < wh; ++y) {
+        for (int x = static_cast<int>(ww * 0.22); x < static_cast<int>(ww * 0.78); ++x) {
+            int r = 0, g = 0, b = 0;
+            ppm_pixel(wrgb, ww, wh, x, y, r, g, b);
+            const int bright = std::max(r, std::max(g, b));
+            if (bright < 130) {
+                continue;
+            }
+            if (std::abs(r - g) < 10 && std::abs(g - b) < 10 && bright < 160) {
+                continue;
+            }
+            ++w_topbar;
+        }
+    }
+    int top_flat = 0;
+    for (int y = wh - 1; y > std::max(0, wh - static_cast<int>(wh * 0.35)); --y) {
+        int row_grey = 0;
+        for (int x = static_cast<int>(ww * 0.30); x < static_cast<int>(ww * 0.85); x += 3) {
+            int r = 0, g = 0, b = 0;
+            ppm_pixel(wrgb, ww, wh, x, y, r, g, b);
+            if (std::abs(r - g) < 18 && std::abs(g - b) < 18 && r >= 25 && r <= 100 && b <= r + 10) {
+                ++row_grey;
+            }
+        }
+        if (row_grey > (ww * 0.55) / 3 * 0.40) {
+            ++top_flat;
+        } else if (top_flat > 0) {
+            break;
+        }
+    }
+    std::cout << "window marker " << marker_hits << " topbar_text " << w_topbar << " topbar_rows " << top_flat << "\n";
+    if (marker_hits < 8 || w_topbar < static_cast<int>(topbar_text_min) ||
+        top_flat > static_cast<int>(wh * topbar_frac) || top_flat < 4) {
+        failure << "Window HUD failed. marker=" << marker_hits << " topbar_text=" << w_topbar
+                << " topbar_rows=" << top_flat << "\n\n";
+        std::cout << "m7 FAIL window-hud\n";
+        return fail_write(1);
+    }
+
+    // Magenta on select/build/minimap end shots
+    for (const char* shot : {"/m7select/select-end.ppm", "/m7build/build-end.ppm", "/m7minimap/minimap-end.ppm"}) {
+        int w = 0, h = 0;
+        std::vector<uint8_t> rgb;
+        std::string err;
+        if (!read_ppm(options.actual + shot, w, h, rgb, err) || w != 1280 || h != 720 || count_magenta(rgb) != 0) {
+            failure << "Shot " << shot << " failed: " << err << "\n\n";
+            std::cout << "m7 FAIL shot " << shot << "\n";
+            return fail_write(1);
+        }
+    }
+
+    failure << "Selection cursormove cmd 10 sel [1], build armmex at " << build_x << "," << build_z
+            << ", minimap move near " << mmap_x << "," << mmap_z << ", HUD armcom half-health range " << range
+            << ", Retina " << dw << "x" << dh << ". Self-only (no Recoil HUD trace).\n\n";
+    failure << "The m7 self-check passed on engine output from check_m7*. No Recoil HUD oracle is pinned. m1 stays "
+               "red without reference pictures. The M4/M5/M6 milestones stay red until their Recoil traces exist.\n";
+    std::ofstream passed(options.oracle + "/last_failure.md");
+    passed << failure.str();
+    std::cout << "m7 PASS\n";
+    return 0;
+}
+
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -8914,6 +9340,9 @@ int main(int argc, char** argv) {
     }
     if (options.suite == "ai_10min") {
         return gate_ai10(options);
+    }
+    if (options.suite == "m7") {
+        return gate_m7(options);
     }
     std::cerr << "gate: unknown suite " << options.suite << "\n";
     return 2;

@@ -417,3 +417,17 @@ coordinates are not locked. A later 10-minute run had 114 units and mex
 income 6.9099 and 6.9006, still above the same 0.01 floor, with both
 armcoms present. No floor moved. No Recoil resource trace was added.
 The M4 2% bar and the M5 15% time-to-kill bar have not moved.
+
+M7 introduced its own bar from the official `gate --suite m7` self gate
+(no Recoil HUD trace). End-frame top-bar text coverage stays at least 40
+lit non-chrome pixels. Wind and counter pods need at least 20 and 8 lit
+glyph pixels. Income red/green glyphs need at least 20 colored pixels
+and an edge count of at least half that (crisp outline, not a same-color
+blob). Selection keeps sel [1], cursor cursormove, cmd 10. Build keeps
+armmex at 7416, 4888 with a live nano id. Minimap click stays within 250
+elmos of 8000, 4900. HUD hover stays armcom at half health with range
+300; the orange ring count stays between 800 and 30000 with median
+radius above 100. Retina drawable stays at least 2800x1700; topbar grey
+rows stay within 10% of height; panel stability mean_diff stays under
+25. Magenta tiles stay 0. The ai_10min floors did not move. Those numbers
+have not moved.
