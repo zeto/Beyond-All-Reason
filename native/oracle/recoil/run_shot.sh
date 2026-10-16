@@ -10,6 +10,7 @@ DAMAGE="0"
 BUILDDEF=""
 SELECT="1"
 SHOTFRAME="60"
+CAMMODE="spring_orbit"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -19,6 +20,7 @@ while [[ $# -gt 0 ]]; do
     --builddef) BUILDDEF="${2:?}"; shift 2 ;;
     --select) SELECT="${2:?}"; shift 2 ;;
     --shotframe) SHOTFRAME="${2:?}"; shift 2 ;;
+    --cammode) CAMMODE="${2:?}"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -113,6 +115,7 @@ cat > "$ROOT/boot.txt" <<BOOTEOF
 		barmetal_builddef=${BUILDDEF};
 		barmetal_select=${SELECT};
 		barmetal_shotframe=${SHOTFRAME};
+		barmetal_cammode=${CAMMODE};
 	}
 	[ALLYTEAM0]
 	{

@@ -1,40 +1,45 @@
 # M7 HUD FLIP bookmarks
 
 Plan exit (`native/PLAN.md`): checklist complete + HUD bookmarks under
-`m7_flip` 0.22. Shared bookmark defs: `native/oracle/hud_bookmarks.json`.
+`m7_flip` 0.22. Shared defs: `native/oracle/hud_bookmarks.json`.
 
 ## Headed Recoil capture
 
-The installed BAR Launcher spring **can** capture headed reference PNGs at
-fixed bookmarks when launched without `-hidden`, with Zink+MoltenVK, and
-with `MacRenderScale=1` / `SPRING_MAC_NO_RETINA=1` for 1280×720 pixels.
+Works without `-hidden`, with Zink+MoltenVK, `MacRenderScale=1`,
+`SPRING_MAC_NO_RETINA=1`. Oracle mutator only (`/tmp/bar-oracle`).
 
-Oracle-only (not stock tree):
+### Camera lock (checkpoint)
 
-- `shot_gadget.lua` — select/build/damage HUD state + `gl.SaveImage`
-- `shot_camera_widget.lua` — free-cam lock toward bar-metal commander pose
-- `run_shot.sh` — packs mutator into `/tmp/bar-oracle` write-dir
+`shot_camera_widget.lua` locks every frame to the bar-metal
+`--lock-camera` pose from `native/map/camera.cpp`:
+
+- Spring **spring** cam (`mode=2`), not free (free reports correct eye
+  but renders purple void on this Mac/Zink path).
+- `rx = π - tilt` (tilt 1 → rx ≈ 2.142, inside Spring’s
+  `[0.51π, 0.99π]` clamp in `SpringController.cpp`).
+- `ry = 0`, `dist = 400`, focus at commander xz.
+- Eye XZ matches want within 1 elmo; eye Y is ~58 elmos high (Spring
+  focus sits on ground height, not unit_y+30).
+
+Median FLIP after lock: **~0.45** (was ~0.90 with unlocked/free cam).
+
+## Remaining for ≤ 0.22
+
+Host full BAR LuaUI chrome in bar-metal to match the refs (not trim
+Recoil). First batch still outstanding:
+
+- `gui_ordermenu`, `gui_info`, `gui_buildmenu`
+- `gui_top_bar_buttons`, `gui_idle_builders`
+- chat/voice/console (`gui_chat` and related)
+
+Already loaded in `widget_host.cpp`: fonthandler, flowui, top_bar,
+selectionbox, gridmenu, tooltip, relative, minimap, volume, cursor,
+screen_mode_info.
+
+Add Spring/gl only as widgets hit them; no stubs. GL4 via `rhi/metal4`.
 
 ## Scoring
 
-`native/tools/check_m7flip.sh` captures bar-metal lock-camera PNGs and
-headed Recoil refs into `native/oracle/out/m7flip/{bar,ref}/`, scores with
-NVIDIA `flip-evaluator` (venv at `native/tools/.flip-venv`, not vendored
-into the frame path), writes `flip.json`.
-
-`gate --suite m7` reads that report; median must be ≤ `m7_flip` (0.22).
-
-## Current blocker (do not loosen the bar)
-
-Median FLIP is ~0.90. Fixes needed before a green gate:
-
-1. Recoil free-cam lock still fails to frame the commander like bar-metal
-   `--lock-camera` (world often purple/void or wrong look). Spring camera
-   modes clamp or drift; needs a reliable lock that matches
-   `native/map/camera.cpp` eye/target.
-2. Full BAR LuaUI chrome (bottom panels, voice, menus) vs bar-metal’s
-   native HUD reimplementation dominate the error map even when the 3D
-   view is closer. Layout parity work on bar-metal HUD (or an oracle-only
-   Recoil widget set that matches the five layers) is required.
-
-Do not lower `m7_flip`. Do not enter M8 on a red m7.
+`native/tools/check_m7flip.sh` + `flip-evaluator` in
+`native/tools/.flip-venv`. `gate --suite m7` reads
+`oracle/out/m7flip/flip.json`. Do not lower `m7_flip`.
