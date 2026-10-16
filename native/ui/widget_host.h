@@ -33,7 +33,12 @@ void widgets_set_view(int width, int height);
 void widgets_set_pointer(float x, float y, bool left, bool middle, bool right, bool alt, bool ctrl, bool meta,
                          bool shift);
 
-bool widgets_mouse_press(float x, float y, int button, std::string& error);
+// MousePress through the hosted widgets, front-most first. consumed is true when one took it;
+// that widget then gets the MouseRelease.
+bool widgets_mouse_press(float x, float y, int button, bool& consumed, std::string& error);
+bool widgets_mouse_release(float x, float y, int button, std::string& error);
+// SelectionChanged for grid, order and info menus, only when the selection differs from the last call.
+bool widgets_selection_changed_live(const std::vector<int>& unit_ids, std::string& error);
 
 // Notify stock widgets that the selection changed (Spring unit ids).
 bool widgets_selection_changed(const std::vector<int>& unit_ids, std::string& error);

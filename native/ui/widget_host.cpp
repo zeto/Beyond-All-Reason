@@ -930,13 +930,7 @@ int ui_get_active_cmd_descs(lua_State* state) {
         lua_rawseti(state, -2, ++n);
     };
     // CMDTYPE from Recoil Command.h
-    constexpr int T_ICON = 0;
     constexpr int T_MODE = 5;
-    constexpr int T_MAP = 10;
-    constexpr int T_UNIT = 12;
-    constexpr int T_UNIT_OR_MAP = 13;
-    constexpr int T_AREA = 11;
-    constexpr int T_UNIT_FEAT_AREA = 19;
     auto add_mode = [&](int id, const char* name, const char* action, const char* cursor, int mode,
                         std::initializer_list<const char*> labels) {
         lua_newtable(state);
@@ -965,23 +959,21 @@ int ui_get_active_cmd_descs(lua_State* state) {
         lua_setfield(state, -2, "params");
         lua_rawseti(state, -2, ++n);
     };
-    // Spring CmdDesc params: [1]=current index, [2..]=labels (see CustomFirestateDefs.stateLabel).
-    add_mode(45, "Firestate", "firestate", "cursorattack", 2, {"Hold fire", "Return fire", "Fire at will"});
-    add_mode(50, "Movestate", "movestate", "cursormove", 1, {"Hold pos", "Maneuver", "Roam"});
-    add_mode(115, "Repeat", "repeat", "cursorattack", 0, {"Repeat off", "Repeat on"});
-    add(5, T_ICON, "Wait", "wait", "cursorwait", nullptr, 0);
-    add(0, T_ICON, "Stop", "stop", "cursorstop", nullptr, 0);
-    add(20, T_UNIT_OR_MAP, "Attack", "attack", "cursorattack", nullptr, 0);
-    add(105, T_UNIT_OR_MAP, "DGun", "manualfire", "cursordgun", nullptr, 0);
-    add(10, T_MAP, "Move", "move", "cursormove", nullptr, 0);
-    add(15, T_MAP, "Patrol", "patrol", "cursorpatrol", nullptr, 0);
-    add(16, T_UNIT_OR_MAP, "Fight", "fight", "cursorfight", nullptr, 0);
-    add(25, T_UNIT, "Guard", "guard", "cursordefend", nullptr, 0);
-    add(40, T_UNIT_FEAT_AREA, "Repair", "repair", "cursorrepair", nullptr, 0);
-    add(90, T_UNIT_FEAT_AREA, "Reclaim", "reclaim", "cursorreclamate", nullptr, 0);
-    add(110, T_AREA, "Restore", "restore", "cursorrestore", nullptr, 0);
-    add(130, T_UNIT_FEAT_AREA, "Capture", "capture", "cursorcapture", nullptr, 0);
-    add(65, T_ICON, "SelfD", "selfd", "cursorspecial", nullptr, 0);
+    // Spring CmdDesc params: [1]=current state, [2..]=labels (see CustomFirestateDefs.stateLabel).
+    // Same list and order as GetCmdDescIndex / SetActiveCommand(index) (build_active_descs).
+    for (const ActiveCmdDesc& desc : build_active_descs(g_sim, unit)) {
+        if (desc.id == 45) {
+            add_mode(45, "Firestate", "firestate", "cursorattack", unit_fire_state(g_sim, unit),
+                     {"Hold fire", "Return fire", "Fire at will"});
+        } else if (desc.id == 50) {
+            add_mode(50, "Movestate", "movestate", "cursormove", unit_move_state(g_sim, unit),
+                     {"Hold pos", "Maneuver", "Roam"});
+        } else if (desc.id == 115) {
+            add_mode(115, "Repeat", "repeat", "cursorattack", unit_repeat_state(unit), {"Repeat off", "Repeat on"});
+        } else {
+            add(desc.id, desc.type, desc.name.c_str(), desc.action.c_str(), desc.cursor.c_str(), nullptr, 0);
+        }
+    }
     (void)unit;
     return 1;
 }
@@ -989,14 +981,10 @@ int ui_get_active_cmd_descs(lua_State* state) {
 int ui_find_unit_cmd_desc(lua_State* state) {
     const int unit = static_cast<int>(luaL_checknumber(state, 1));
     const int cmd = static_cast<int>(luaL_checknumber(state, 2));
-    (void)unit;
-    // 1-based index into GetActiveCmdDescs order for known ids.
-    static const int kIds[] = {45, 50, 115, 5, 0, 20, 105, 10, 15, 16, 25, 40, 90, 110, 130, 65};
-    for (int i = 0; i < static_cast<int>(sizeof(kIds) / sizeof(kIds[0])); ++i) {
-        if (kIds[i] == cmd) {
-            lua_pushinteger(state, i + 1);
-            return 1;
-        }
+    const int index = build_active_desc_index(g_sim, unit, cmd);
+    if (index > 0) {
+        lua_pushinteger(state, index);
+        return 1;
     }
     return 0;
 }
@@ -1111,7 +1099,11 @@ int ui_set_active_command(lua_State* state) {
         lua_pushboolean(state, 1);
         return 1;
     }
-    if (!build_set_active_command(cmd, g_sim, selected, error)) {
+    (void)selected;
+    // SetActiveCommand(index [, button, leftClick, rightClick, alt, ctrl, meta, shift]).
+    const int button = lua_isnumber(state, 2) ? static_cast<int>(lua_tonumber(state, 2)) : 1;
+    if (!build_activate_index(cmd, button, g_sim, snap.selected, error)) {
+        std::cerr << "SetActiveCommand(" << cmd << "): " << error << "\n";
         lua_pushboolean(state, 0);
         return 1;
     }
@@ -1132,14 +1124,49 @@ int ui_get_active_command_build(lua_State* state) {
     return ui_get_active_command(state);
 }
 
+// GetUnitStates(unitID): the unit's fire / move / repeat state.
+int ui_get_unit_states(lua_State* state) {
+    const int unit = static_cast<int>(luaL_checknumber(state, 1));
+    bool valid = false;
+    if (g_sim != nullptr) {
+        for (size_t i = 0; i < g_sim->id.size(); ++i) {
+            valid = valid || (g_sim->id[i] == unit && (g_sim->alive.empty() || g_sim->alive[i] != 0));
+        }
+    }
+    if (!valid) {
+        return 0;
+    }
+    // GetUnitStates(unitID, false): firestate, movestate, repeat, cloak, active, trajectory.
+    if (lua_isboolean(state, 2) && lua_toboolean(state, 2) == 0) {
+        lua_pushinteger(state, unit_fire_state(g_sim, unit));
+        lua_pushinteger(state, unit_move_state(g_sim, unit));
+        lua_pushboolean(state, unit_repeat_state(unit));
+        lua_pushboolean(state, 0);
+        lua_pushboolean(state, 1);
+        lua_pushboolean(state, 0);
+        return 6;
+    }
+    lua_newtable(state);
+    lua_pushinteger(state, unit_fire_state(g_sim, unit));
+    lua_setfield(state, -2, "firestate");
+    lua_pushinteger(state, unit_move_state(g_sim, unit));
+    lua_setfield(state, -2, "movestate");
+    lua_pushboolean(state, unit_repeat_state(unit));
+    lua_setfield(state, -2, "repeat");
+    lua_pushboolean(state, 0);
+    lua_setfield(state, -2, "cloak");
+    lua_pushboolean(state, 1);
+    lua_setfield(state, -2, "active");
+    lua_pushboolean(state, 0);
+    lua_setfield(state, -2, "trajectory");
+    return 1;
+}
+
 int ui_get_cmd_desc_index(lua_State* state) {
     const int cmd = static_cast<int>(luaL_checknumber(state, 1));
-    const int index = build_cmd_desc_index(cmd);
-    if (index == 0 && cmd < 0) {
-        // Build options: pretend index exists so pickBlueprint can SetActiveCommand(cmd)
-        lua_pushinteger(state, 1);
-        return 1;
-    }
+    const SelectionSnapshot& snap = selection_snapshot();
+    const int unit = snap.selected.empty() ? 0 : snap.selected.front();
+    const int index = build_active_desc_index(g_sim, unit, cmd);
     if (index == 0) {
         return 0;
     }
@@ -1339,18 +1366,65 @@ int ui_load_sound_def(lua_State* state) {
     return 1;
 }
 
+bool give_unit_order(lua_State* state, int unit, int cmd, int params_index);
+
 int ui_give_order(lua_State* state) {
-    // Mirror gadget GiveOrderToUnit for build placements from the UI state.
+    // GiveOrderToUnit(unitID, cmdID, params, options).
     const int unit = static_cast<int>(luaL_checknumber(state, 1));
     const int cmd = static_cast<int>(luaL_checknumber(state, 2));
+    lua_pushboolean(state, give_unit_order(state, unit, cmd, 3) ? 1 : 0);
+    return 1;
+}
+
+// GiveOrder(cmdID, params, options) goes to every selected unit.
+int ui_give_order_selected(lua_State* state) {
+    const int cmd = static_cast<int>(luaL_checknumber(state, 1));
+    bool any = false;
+    const std::vector<int> selected = selection_snapshot().selected;
+    for (int unit : selected) {
+        any = give_unit_order(state, unit, cmd, 2) || any;
+    }
+    lua_pushboolean(state, any ? 1 : 0);
+    return 1;
+}
+
+// GiveOrderToUnitArray(unitIDs, cmdID, params, options).
+int ui_give_order_array(lua_State* state) {
+    const int cmd = static_cast<int>(luaL_checknumber(state, 2));
+    bool any = false;
+    if (lua_istable(state, 1)) {
+        const int n = static_cast<int>(lua_objlen(state, 1));
+        for (int i = 1; i <= n; ++i) {
+            lua_rawgeti(state, 1, i);
+            const int unit = static_cast<int>(lua_tonumber(state, -1));
+            lua_pop(state, 1);
+            any = give_unit_order(state, unit, cmd, 3) || any;
+        }
+    }
+    lua_pushboolean(state, any ? 1 : 0);
+    return 1;
+}
+
+bool give_unit_order(lua_State* state, int unit, int cmd, int params_index) {
+    if (cmd == 45 || cmd == 50 || cmd == 115) {
+        int value = -1;
+        if (lua_istable(state, params_index)) {
+            lua_rawgeti(state, params_index, 1);
+            value = lua_isnumber(state, -1) ? static_cast<int>(lua_tonumber(state, -1)) : -1;
+            lua_pop(state, 1);
+        } else if (lua_isnumber(state, params_index)) {
+            value = static_cast<int>(lua_tonumber(state, params_index));
+        }
+        return unit_apply_state_command(g_sim, unit, cmd, value);
+    }
     if (cmd < 0) {
         float x = 0;
         float z = 0;
-        if (lua_istable(state, 3)) {
-            lua_rawgeti(state, 3, 1);
+        if (lua_istable(state, params_index)) {
+            lua_rawgeti(state, params_index, 1);
             x = static_cast<float>(lua_tonumber(state, -1));
             lua_pop(state, 1);
-            lua_rawgeti(state, 3, 3);
+            lua_rawgeti(state, params_index, 3);
             z = static_cast<float>(lua_tonumber(state, -1));
             lua_pop(state, 1);
         }
@@ -1366,11 +1440,11 @@ int ui_give_order(lua_State* state) {
         }
         lua_pop(state, 2);
         std::string error;
-        if (!name.empty()) {
-            player_issue_build(unit, name, x, z, error);
+        if (!name.empty() && player_issue_build(unit, name, x, z, error)) {
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 
 // Spring.Echo stringifies each argument with tostring and joins them with ", ".
@@ -1923,6 +1997,9 @@ os.clock = os.clock or function() return 0 end
     set_spring(state, "GetTeamUnitsSorted", ui_get_team_units_sorted);
     set_spring(state, "PlaySoundFile", ui_play_sound);
     set_spring(state, "GiveOrderToUnit", ui_give_order);
+    set_spring(state, "GiveOrder", ui_give_order_selected);
+    set_spring(state, "GiveOrderToUnitArray", ui_give_order_array);
+    set_spring(state, "GetUnitStates", ui_get_unit_states);
     set_spring(state, "Echo", ui_echo);
     set_spring(state, "GetTeamRulesParams", ui_team_rules_params);
     set_spring(state, "GetUnitIsBuilding", ui_unit_is_building);
@@ -2205,6 +2282,33 @@ bool widgets_frame(int frame, std::string& error) {
         return true;
     }
     lua_State* state = g_state;
+    // widget:GameStart once the sim has left frame 0, as the widget handler sends it when the game
+    // starts. gui_gridmenu leaves its pregame blueprint mode only on this callin.
+    if (build_take_commands_changed()) {
+        for (const char* key : {"bar_ui_order", "bar_ui_grid"}) {
+            g_current_widget = key;
+            const bool ok = call_registry(state, key, "CommandsChanged", nullptr, 0, false, error);
+            g_current_widget.clear();
+            if (!ok) {
+                error = std::string(key) + " CommandsChanged: " + error;
+                return false;
+            }
+        }
+    }
+    static bool s_game_started = false;
+    if (!s_game_started && frame > 0) {
+        s_game_started = true;
+        for (const char* key : {"bar_ui_top", "bar_ui_select", "bar_ui_grid", "bar_ui_tooltip", "bar_ui_minimap",
+                                "bar_ui_order", "bar_ui_info"}) {
+            g_current_widget = key;
+            const bool ok = call_registry(state, key, "GameStart", nullptr, 0, false, error);
+            g_current_widget.clear();
+            if (!ok) {
+                error = std::string(key) + " GameStart: " + error;
+                return false;
+            }
+        }
+    }
     if (g_next_w > 0 && g_next_h > 0 && (g_next_w != g_applied_w || g_next_h != g_applied_h)) {
         gl_set_view(g_next_w, g_next_h);
         selection_set_view(g_next_w, g_next_h);
@@ -2661,20 +2765,117 @@ void widgets_set_pointer(float x, float y, bool left, bool middle, bool right, b
     selection_set_mouse(x, y, left, middle, right, alt, ctrl, meta, shift);
 }
 
-bool widgets_mouse_press(float x, float y, int button, std::string& error) {
+namespace {
+
+// Widget that took the last MousePress (Recoil widgetHandler: it gets the matching MouseRelease).
+std::string g_mouse_owner;
+
+// Calls key:method(x, y, button) and reads a true first result as "consumed".
+bool call_mouse(lua_State* state, const char* key, const char* method, float x, float y, int button,
+                bool& consumed, std::string& error) {
+    consumed = false;
+    lua_getfield(state, LUA_REGISTRYINDEX, key);
+    if (!lua_istable(state, -1)) {
+        lua_pop(state, 1);
+        return true;
+    }
+    lua_getfield(state, -1, method);
+    if (!lua_isfunction(state, -1)) {
+        lua_pop(state, 2);
+        return true;
+    }
+    lua_insert(state, -2);  // fn, self
+    lua_pushnumber(state, x);
+    lua_pushnumber(state, y);
+    lua_pushnumber(state, button);
+    g_current_widget = key;
+    const bool ok = pcall_keep(state, 4, 1, error);
+    g_current_widget.clear();
+    if (!ok) {
+        return false;
+    }
+    consumed = lua_toboolean(state, -1) != 0;
+    lua_pop(state, 1);
+    return true;
+}
+
+}  // namespace
+
+bool widgets_mouse_press(float x, float y, int button, bool& consumed, std::string& error) {
+    consumed = false;
+    g_mouse_owner.clear();
     if (!g_loaded || g_state == nullptr) {
         return true;
     }
-    const double args[3] = {x, y, static_cast<double>(button)};
-    g_current_widget = "bar_ui_minimap";
-    if (!call_registry(g_state, "bar_ui_minimap", "MousePress", args, 3, false, error)) {
-        g_current_widget.clear();
+    // Front-most layers first, as the widget handler walks them: order menu, grid menu, info,
+    // minimap, then the selection box (which never takes the press).
+    static const char* kOrder[] = {"bar_ui_order", "bar_ui_grid", "bar_ui_info", "bar_ui_minimap", "bar_ui_select"};
+    for (const char* key : kOrder) {
+        bool took = false;
+        if (!call_mouse(g_state, key, "MousePress", x, y, button, took, error)) {
+            error = std::string(key) + " MousePress: " + error;
+            return false;
+        }
+        if (took) {
+            consumed = true;
+            g_mouse_owner = key;
+            std::cout << "ui press " << key << " at " << x << " " << y << " button " << button << "\n";
+            return true;
+        }
+    }
+    return true;
+}
+
+bool widgets_mouse_release(float x, float y, int button, std::string& error) {
+    if (!g_loaded || g_state == nullptr || g_mouse_owner.empty()) {
+        return true;
+    }
+    const std::string owner = g_mouse_owner;
+    g_mouse_owner.clear();
+    bool ignored = false;
+    return call_mouse(g_state, owner.c_str(), "MouseRelease", x, y, button, ignored, error);
+}
+
+bool widgets_selection_changed_live(const std::vector<int>& unit_ids, std::string& error) {
+    static std::vector<int> s_last;
+    static bool s_have = false;
+    if (s_have && s_last == unit_ids) {
+        return true;
+    }
+    s_have = true;
+    s_last = unit_ids;
+    if (!widgets_selection_changed(unit_ids, error)) {
         return false;
     }
-    g_current_widget = "bar_ui_select";
-    const bool ok = call_registry(g_state, "bar_ui_select", "MousePress", args, 3, false, error);
-    g_current_widget.clear();
-    return ok;
+    if (!g_loaded || g_state == nullptr) {
+        return true;
+    }
+    for (const char* key : {"bar_ui_order", "bar_ui_info"}) {
+        lua_getfield(g_state, LUA_REGISTRYINDEX, key);
+        if (!lua_istable(g_state, -1)) {
+            lua_pop(g_state, 1);
+            continue;
+        }
+        lua_getfield(g_state, -1, "SelectionChanged");
+        if (!lua_isfunction(g_state, -1)) {
+            lua_pop(g_state, 2);
+            continue;
+        }
+        lua_insert(g_state, -2);
+        lua_newtable(g_state);
+        for (size_t i = 0; i < unit_ids.size(); ++i) {
+            lua_pushinteger(g_state, unit_ids[i]);
+            lua_rawseti(g_state, -2, static_cast<int>(i) + 1);
+        }
+        g_current_widget = key;
+        const bool ok = pcall_keep(g_state, 2, 0, error);
+        g_current_widget.clear();
+        if (!ok) {
+            error = std::string(key) + " SelectionChanged: " + error;
+            return false;
+        }
+    }
+    return true;
 }
 
 const HudList* hud_list() {

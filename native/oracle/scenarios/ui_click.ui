@@ -1,0 +1,17 @@
+# --ui-input for flip_select.input at 1280x720: clicks routed like live input (widgets first).
+# Ordermenu "Fire at will" cell, left click: cycles to Hold fire.
+10 press 309 87
+11 release 309 87
+# Gridmenu armmex cell (50 / 500), left click: picks the blueprint.
+15 press 35 170
+16 release 35 170
+# Ground in front of the commander: places it.
+20 press 760 200
+21 release 760 200
+# Pick armmex again, then right click on the ground: cancels the placement, no order.
+25 press 35 170
+26 release 35 170
+28 rclick 760 200
+# Ordermenu "Hold pos" cell, left click: cycles the move state to Maneuver.
+30 press 377 87
+31 release 377 87

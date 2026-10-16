@@ -316,6 +316,8 @@ bool load_unit_role(const std::string& game_root, const std::string& def_name, U
     role.speed = lua_number(state, "speed", 0);
     role.worker_time = lua_number(state, "workertime", 0);
     role.can_fly = flag("canfly");
+    role.fire_state = static_cast<int>(lua_number(state, "firestate", -1));
+    role.move_state = static_cast<int>(lua_number(state, "movestate", -1));
     lua_getfield(state, -1, "yardmap");
     role.yardmap = lua_isnil(state, -1) == 0;
     lua_pop(state, 1);

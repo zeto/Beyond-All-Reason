@@ -74,6 +74,8 @@ struct Options {
     std::string trace;
     std::string orders;
     std::string input;
+    // Scripted mouse clicks routed like live input (widgets first, then placement / selection / orders).
+    std::string ui_input;
     std::string pieces;
     bool lock_camera = false;
     // Skip Map Grass GL4 (A/B timing of the grass pass).
@@ -164,6 +166,12 @@ bool parse_args(int argc, char** argv, Options& options) {
                 return false;
             }
             options.input = value;
+        } else if (arg == "--ui-input") {
+            const char* value = need("--ui-input");
+            if (value == nullptr) {
+                return false;
+            }
+            options.ui_input = value;
         } else if (arg == "--pieces") {
             const char* value = need("--pieces");
             if (value == nullptr) {
@@ -290,6 +298,42 @@ FrameInput collect_input(NSWindow* window, NSView* view) {
         [NSApp sendEvent:event];
     }
     return input;
+}
+
+// --ui-input line: FRAME press|release|rclick X Y [shift]. X/Y are drawable pixels, y up (Spring).
+struct UiEvent {
+    int frame = 0;
+    std::string kind;
+    float x = 0;
+    float y = 0;
+    bool shift = false;
+};
+
+bool load_ui_events(const std::string& path, std::vector<UiEvent>& events, std::string& error) {
+    std::ifstream in(path);
+    if (!in) {
+        error = "could not read ui input " + path;
+        return false;
+    }
+    std::string line;
+    int lineno = 0;
+    while (std::getline(in, line)) {
+        ++lineno;
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        std::istringstream row(line);
+        UiEvent event;
+        if (!(row >> event.frame >> event.kind >> event.x >> event.y) ||
+            (event.kind != "press" && event.kind != "release" && event.kind != "rclick")) {
+            error = "bad ui input line " + std::to_string(lineno);
+            return false;
+        }
+        std::string mod;
+        event.shift = (row >> mod) && mod == "shift";
+        events.push_back(event);
+    }
+    return true;
 }
 
 struct CocoaWindow {
@@ -1159,6 +1203,12 @@ int run_terrain(const Options& options, const std::string& game_name) {
     camera.view_width = window_w;
     camera.view_height = window_h;
     const bool scripted = options.frames > 0;
+    std::vector<UiEvent> ui_events;
+    if (!options.ui_input.empty() && !load_ui_events(options.ui_input, ui_events, error)) {
+        std::cerr << "ui input: " << error << "\n";
+        return 1;
+    }
+    bool ui_left_owned = false;
     const int frame_limit = options.frames > 0 ? options.frames : 1000000;
     int presented = 0;
     float sim_accum = 0;
@@ -1272,47 +1322,124 @@ int run_terrain(const Options& options, const std::string& game_name) {
                 }
                 bar::selection_set_marks(marks);
 
+                // One path for live clicks and --ui-input clicks: the hosted widgets see the press first
+                // (order menu, grid menu, info, minimap); an untaken left press places the active build or
+                // starts selection; an untaken right click cancels the active command or orders a move.
+                std::vector<UiEvent> clicks;
+                const bool shift_down = ([NSEvent modifierFlags] & NSEventModifierFlagShift) != 0;
                 if (!scripted) {
                     if (pointer.left_down) {
-                        const float lx = pointer.left_x * pixel_scale;
-                        const float ly = (view_h - pointer.left_y) * pixel_scale;
-                        bar::selection_left_down(lx, ly);
-                        if (!bar::widgets_mouse_press(lx, ly, 1, error)) {
-                            std::cerr << "select: " << error << "\n";
-                            error.clear();
-                        }
-                    }
-                    if (left && bar::selection_snapshot().boxing) {
-                        bar::selection_left_drag(spring_x, spring_y);
+                        clicks.push_back({0, "press", pointer.left_x * pixel_scale,
+                                          (view_h - pointer.left_y) * pixel_scale, shift_down});
                     }
                     if (pointer.left_up) {
-                        const float lx = pointer.left_x * pixel_scale;
-                        const float ly = (view_h - pointer.left_y) * pixel_scale;
-                        bar::selection_left_up(lx, ly);
-                        const bar::SelectionSnapshot& snap = bar::selection_snapshot();
-                        std::cout << "select ids";
-                        for (int id : snap.selected) {
-                            std::cout << " " << id;
-                        }
-                        std::cout << " cursor " << snap.cursor << "\n";
+                        clicks.push_back({0, "release", pointer.left_x * pixel_scale,
+                                          (view_h - pointer.left_y) * pixel_scale, shift_down});
+                    }
+                    if (pointer.order_click) {
+                        clicks.push_back({0, "rclick", pointer.order_x * pixel_scale,
+                                          (view_h - pointer.order_y) * pixel_scale, shift_down});
                     }
                 }
-
-                if (!scripted && pointer.order_click && !sim.x.empty()) {
+                for (const UiEvent& event : ui_events) {
+                    if (event.frame == presented) {
+                        clicks.push_back(event);
+                    }
+                }
+                const float drawable_h = static_cast<float>(layer.drawableSize.height);
+                auto ground_at = [&](float sx, float sy, float& gx, float& gz) {
                     float origin[3] = {};
                     float direction[3] = {};
-                    // Mouse points are in the view. The ray uses the drawable, which is points times the scale.
-                    bar::camera_pointer_ray(camera, pose, pointer.order_x * pixel_scale, pointer.order_y * pixel_scale,
-                                            origin, direction);
-                    float goal_x = 0;
-                    float goal_z = 0;
-                    if (bar::terrain_raycast(mesh, origin, direction, goal_x, goal_z)) {
-                        if (!bar::selection_issue_move(sim, goal_x, goal_z, mesh, error)) {
-                            if (error != "no selection") {
-                                std::cerr << "order: " << error << "\n";
-                            }
+                    bar::camera_pointer_ray(camera, pose, sx, drawable_h - sy, origin, direction);
+                    return bar::terrain_raycast(mesh, origin, direction, gx, gz);
+                };
+                for (const UiEvent& click : clicks) {
+                    const int lead = bar::selection_snapshot().selected.empty()
+                                         ? 0
+                                         : bar::selection_snapshot().selected.front();
+                    if (click.kind == "press") {
+                        bool consumed = false;
+                        if (!bar::widgets_mouse_press(click.x, click.y, 1, consumed, error)) {
+                            std::cerr << "ui: " << error << "\n";
                             error.clear();
                         }
+                        ui_left_owned = consumed;
+                        if (consumed) {
+                            continue;
+                        }
+                        float gx = 0;
+                        float gz = 0;
+                        if (bar::build_cmd_state().placing && ground_at(click.x, click.y, gx, gz) &&
+                            bar::build_live_left_click(sim, mesh, lead, gx, gz, click.shift, error)) {
+                            ui_left_owned = true;
+                            continue;
+                        }
+                        if (!scripted) {
+                            bar::selection_left_down(click.x, click.y);
+                        }
+                    } else if (click.kind == "release") {
+                        if (ui_left_owned) {
+                            ui_left_owned = false;
+                            if (!bar::widgets_mouse_release(click.x, click.y, 1, error)) {
+                                std::cerr << "ui: " << error << "\n";
+                                error.clear();
+                            }
+                            continue;
+                        }
+                        if (!scripted) {
+                            bar::selection_left_up(click.x, click.y);
+                            const bar::SelectionSnapshot& snap = bar::selection_snapshot();
+                            std::cout << "select ids";
+                            for (int id : snap.selected) {
+                                std::cout << " " << id;
+                            }
+                            std::cout << " cursor " << snap.cursor << "\n";
+                        }
+                    } else {
+                        bool consumed = false;
+                        if (!bar::widgets_mouse_press(click.x, click.y, 3, consumed, error)) {
+                            std::cerr << "ui: " << error << "\n";
+                            error.clear();
+                        }
+                        if (consumed) {
+                            if (!bar::widgets_mouse_release(click.x, click.y, 3, error)) {
+                                error.clear();
+                            }
+                            continue;
+                        }
+                        if (bar::build_cmd_state().active_cmd != 0) {
+                            // Right click drops the active command (build placement or order cursor).
+                            std::cout << "ui cancel active " << bar::build_cmd_state().active_cmd << "\n";
+                            bar::build_clear_active_command();
+                            continue;
+                        }
+                        float gx = 0;
+                        float gz = 0;
+                        if (!sim.x.empty() && ground_at(click.x, click.y, gx, gz)) {
+                            if (!bar::selection_issue_move(sim, gx, gz, mesh, error)) {
+                                if (error != "no selection") {
+                                    std::cerr << "order: " << error << "\n";
+                                }
+                                error.clear();
+                            }
+                        }
+                    }
+                }
+                if (!scripted && left && bar::selection_snapshot().boxing) {
+                    bar::selection_left_drag(spring_x, spring_y);
+                }
+                {
+                    if (!bar::widgets_selection_changed_live(bar::selection_snapshot().selected, error)) {
+                        std::cerr << "ui: " << error << "\n";
+                        error.clear();
+                    }
+                }
+                // Footprint follows the pointer while a build is active.
+                if ((!scripted || !ui_events.empty()) && bar::build_cmd_state().placing) {
+                    float gx = 0;
+                    float gz = 0;
+                    if (ground_at(spring_x, spring_y, gx, gz)) {
+                        bar::build_update_preview(mesh, gx, gz);
                     }
                 }
             }

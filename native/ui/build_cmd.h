@@ -77,4 +77,36 @@ int build_cmd_desc_index(int cmd_id);
 
 void build_cycle_facing(int absolute_or_neg1);
 
+// GetActiveCmdDescs entry for the selection. Build options carry id -unitDefID.
+struct ActiveCmdDesc {
+    int id = 0;
+    int type = 0;  // Recoil CMDTYPE
+    std::string name;
+    std::string action;
+    std::string cursor;
+};
+
+// One list in one order for GetActiveCmdDescs, GetCmdDescIndex, FindUnitCmdDesc and SetActiveCommand(index).
+const std::vector<ActiveCmdDesc>& build_active_descs(const UnitSim* sim, int unit_id);
+// 1-based index of cmd id in build_active_descs, 0 when absent.
+int build_active_desc_index(const UnitSim* sim, int unit_id, int cmd_id);
+// SetActiveCommand(index, button): builds start placement, state commands cycle (button 1 forward,
+// otherwise back) on every selected unit, order commands become the active cursor command.
+bool build_activate_index(int index, int button, const UnitSim* sim, const std::vector<int>& selected,
+                          std::string& error);
+
+// CMD.FIRE_STATE / CMD.MOVE_STATE / CMD.REPEAT as unit state (GetUnitStates, cmd desc params).
+int unit_fire_state(const UnitSim* sim, int unit_id);
+int unit_move_state(const UnitSim* sim, int unit_id);
+int unit_repeat_state(int unit_id);
+// Applies a state command (45, 50, 115) to one unit. False for other ids or bad values.
+bool unit_apply_state_command(const UnitSim* sim, int unit_id, int cmd_id, int value);
+
+// True once after a unit state or the active command changed (widget:CommandsChanged).
+bool build_take_commands_changed();
+
+// Live placement: true when a build is active and the click was consumed.
+bool build_live_left_click(UnitSim& sim, const TerrainMesh& terrain, int selected_unit_id, float world_x,
+                           float world_z, bool shift, std::string& error);
+
 }  // namespace bar

@@ -6,6 +6,7 @@
 #include "gadget_host.h"
 
 #include <algorithm>
+#include <map>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -19,6 +20,11 @@ int g_observed_building = 0;
 int g_observed_builder = 0;
 std::string g_game_root;
 std::vector<CmdDesc> g_last_descs;
+std::vector<ActiveCmdDesc> g_active_descs;
+std::map<int, int> g_fire_state;
+std::map<int, int> g_move_state;
+std::map<int, int> g_repeat_state;
+bool g_commands_changed = false;
 
 void push_quad(HudList& hud, float x1, float y1, float x2, float y2, float r, float g, float b, float a) {
     HudVertex corners[4] = {
@@ -67,6 +73,10 @@ void build_cmd_reset() {
     g_observed_builder = 0;
     g_build = BuildCmdState{};
     g_last_descs.clear();
+    g_active_descs.clear();
+    g_fire_state.clear();
+    g_move_state.clear();
+    g_repeat_state.clear();
 }
 
 std::vector<CmdDesc> build_unit_cmd_descs(const UnitSim& sim, int unit_id) {
@@ -399,6 +409,203 @@ bool write_build_report(const std::string& path, int frame, std::string& error) 
     if (!out) {
         error = "failed while writing " + path;
         return false;
+    }
+    return true;
+}
+
+namespace {
+
+bool role_for(const UnitSim* sim, int unit_id, UnitRole& role) {
+    if (sim == nullptr || g_game_root.empty()) {
+        return false;
+    }
+    const int index = sim_index_for(*sim, unit_id);
+    if (index < 0) {
+        return false;
+    }
+    std::string error;
+    return load_unit_role(g_game_root, sim->def_name[static_cast<size_t>(index)], role, error) && role.ok;
+}
+
+}  // namespace
+
+const std::vector<ActiveCmdDesc>& build_active_descs(const UnitSim* sim, int unit_id) {
+    g_active_descs.clear();
+    UnitRole role;
+    if (!role_for(sim, unit_id, role)) {
+        return g_active_descs;
+    }
+    // CMDTYPE from the engine's command type list as BAR's widgets read it (CMDTYPE table).
+    constexpr int T_ICON = 0;
+    constexpr int T_MODE = 5;
+    constexpr int T_MAP = 10;
+    constexpr int T_AREA = 11;
+    constexpr int T_UNIT = 12;
+    constexpr int T_UNIT_OR_MAP = 13;
+    constexpr int T_UNIT_FEAT_AREA = 19;
+    constexpr int T_BUILDING = 20;
+    auto add = [&](int id, int type, const char* name, const char* action, const char* cursor) {
+        g_active_descs.push_back({id, type, name, action, cursor});
+    };
+    add(45, T_MODE, "Firestate", "firestate", "cursorattack");
+    add(50, T_MODE, "Movestate", "movestate", "cursormove");
+    add(115, T_MODE, "Repeat", "repeat", "cursorattack");
+    add(5, T_ICON, "Wait", "wait", "cursorwait");
+    add(0, T_ICON, "Stop", "stop", "cursorstop");
+    add(20, T_UNIT_OR_MAP, "Attack", "attack", "cursorattack");
+    add(105, T_UNIT_OR_MAP, "DGun", "manualfire", "cursordgun");
+    add(10, T_MAP, "Move", "move", "cursormove");
+    add(15, T_MAP, "Patrol", "patrol", "cursorpatrol");
+    add(16, T_UNIT_OR_MAP, "Fight", "fight", "cursorfight");
+    add(25, T_UNIT, "Guard", "guard", "cursordefend");
+    add(40, T_UNIT_FEAT_AREA, "Repair", "repair", "cursorrepair");
+    add(90, T_UNIT_FEAT_AREA, "Reclaim", "reclaim", "cursorreclamate");
+    add(110, T_AREA, "Restore", "restore", "cursorrestore");
+    add(130, T_UNIT_FEAT_AREA, "Capture", "capture", "cursorcapture");
+    add(65, T_ICON, "SelfD", "selfd", "cursorspecial");
+    for (const std::string& option : role.options) {
+        const int def_id = player_unitdef_id(option);
+        if (def_id == 0) {
+            continue;
+        }
+        g_active_descs.push_back({-def_id, T_BUILDING, option, "buildunit_" + option, option});
+    }
+    return g_active_descs;
+}
+
+int build_active_desc_index(const UnitSim* sim, int unit_id, int cmd_id) {
+    const std::vector<ActiveCmdDesc>& descs = build_active_descs(sim, unit_id);
+    for (size_t i = 0; i < descs.size(); ++i) {
+        if (descs[i].id == cmd_id) {
+            return static_cast<int>(i) + 1;
+        }
+    }
+    return 0;
+}
+
+int unit_fire_state(const UnitSim* sim, int unit_id) {
+    const auto it = g_fire_state.find(unit_id);
+    if (it != g_fire_state.end()) {
+        return it->second;
+    }
+    UnitRole role;
+    if (role_for(sim, unit_id, role) && role.fire_state >= 0) {
+        return role.fire_state;
+    }
+    return 2;  // FIRE_AT_WILL when the unit file sets none
+}
+
+int unit_move_state(const UnitSim* sim, int unit_id) {
+    const auto it = g_move_state.find(unit_id);
+    if (it != g_move_state.end()) {
+        return it->second;
+    }
+    UnitRole role;
+    if (role_for(sim, unit_id, role) && role.move_state >= 0) {
+        return role.move_state;
+    }
+    return 1;  // MANEUVER when the unit file sets none
+}
+
+int unit_repeat_state(int unit_id) {
+    const auto it = g_repeat_state.find(unit_id);
+    return it != g_repeat_state.end() ? it->second : 0;
+}
+
+bool unit_apply_state_command(const UnitSim* sim, int unit_id, int cmd_id, int value) {
+    if (sim == nullptr || sim_index_for(*sim, unit_id) < 0) {
+        return false;
+    }
+    if (cmd_id == 45 && value >= 0 && value <= 3) {
+        g_fire_state[unit_id] = value;
+    } else if (cmd_id == 50 && value >= 0 && value <= 2) {
+        g_move_state[unit_id] = value;
+    } else if (cmd_id == 115 && (value == 0 || value == 1)) {
+        g_repeat_state[unit_id] = value;
+    } else {
+        return false;
+    }
+    g_commands_changed = true;
+    std::cout << "unit state " << unit_id << " cmd " << cmd_id << " = " << value << "\n";
+    return true;
+}
+
+bool build_take_commands_changed() {
+    const bool changed = g_commands_changed;
+    g_commands_changed = false;
+    return changed;
+}
+
+bool build_activate_index(int index, int button, const UnitSim* sim, const std::vector<int>& selected,
+                          std::string& error) {
+    if (selected.empty()) {
+        error = "no builder selected";
+        return false;
+    }
+    const std::vector<ActiveCmdDesc> descs = build_active_descs(sim, selected.front());
+    if (index < 1 || index > static_cast<int>(descs.size())) {
+        error = "cmd desc index out of range";
+        return false;
+    }
+    const ActiveCmdDesc& desc = descs[static_cast<size_t>(index - 1)];
+    if (desc.id < 0) {
+        if (!build_set_by_def(desc.name, -desc.id, sim, error)) {
+            return false;
+        }
+        g_build.active_index = index;
+        return true;
+    }
+    if (desc.id == 45 || desc.id == 50 || desc.id == 115) {
+        const int count = desc.id == 45 ? 4 : (desc.id == 50 ? 3 : 2);
+        const int lead = selected.front();
+        const int current = desc.id == 45 ? unit_fire_state(sim, lead)
+                            : desc.id == 50 ? unit_move_state(sim, lead)
+                                            : unit_repeat_state(lead);
+        // The menu shows 3 fire states; FIRE_AT_ALL (3) is reachable by command only.
+        const int shown = desc.id == 45 ? 3 : count;
+        int next = button == 1 ? current + 1 : current - 1;
+        if (next >= shown) {
+            next = 0;
+        }
+        if (next < 0) {
+            next = shown - 1;
+        }
+        for (int unit : selected) {
+            unit_apply_state_command(sim, unit, desc.id, next);
+        }
+        return true;
+    }
+    if (desc.id == 0) {
+        build_clear_active_command();
+        return true;
+    }
+    g_build = BuildCmdState{};
+    g_build.active_cmd = desc.id;
+    g_build.active_index = index;
+    g_build.active_name = desc.name;
+    return true;
+}
+
+bool build_live_left_click(UnitSim& sim, const TerrainMesh& terrain, int selected_unit_id, float world_x,
+                           float world_z, bool shift, std::string& error) {
+    if (!g_build.placing || g_build.def_name.empty()) {
+        return false;
+    }
+    build_update_preview(terrain, world_x, world_z);
+    if (!build_place(sim, selected_unit_id, terrain, error)) {
+        std::cerr << "build: " << error << "\n";
+        error.clear();
+        return true;
+    }
+    g_observed_builder = selected_unit_id;
+    const int building = unit_is_building(selected_unit_id);
+    if (building > 0) {
+        g_observed_building = building;
+    }
+    std::cout << "build place " << g_build.def_name << " at " << g_build.preview_x << " " << g_build.preview_z
+              << "\n";
+    if (!shift) {
+        build_clear_active_command();
     }
     return true;
 }

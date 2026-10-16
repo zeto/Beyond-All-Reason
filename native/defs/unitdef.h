@@ -129,6 +129,9 @@ struct UnitRole {
     bool can_fly = false;
     bool factory = false;
     bool has_weapon = false;
+    // Unit-file firestate / movestate; -1 when the file leaves them to the engine default.
+    int fire_state = -1;
+    int move_state = -1;
 };
 
 bool load_unit_role(const std::string& game_root, const std::string& def_name, UnitRole& role, std::string& error);
