@@ -1483,6 +1483,21 @@ int gl_config_minimap(lua_State* state) {
 void fill_live_def_stats(lua_State* state, const std::string& game_root) {
     if (g_sim == nullptr) return;
     std::vector<std::string> seen;
+    lua_getglobal(state, "Spring");
+    lua_newtable(state);
+    {
+        int n = 0;
+        std::vector<std::string> names;
+        for (const std::string& nm : g_sim->def_name) {
+            if (!nm.empty() && std::find(names.begin(), names.end(), nm) == names.end()) {
+                names.push_back(nm);
+                lua_pushstring(state, nm.c_str());
+                lua_rawseti(state, -2, ++n);
+            }
+        }
+    }
+    lua_setfield(state, -2, "_liveDefNames");
+    lua_pop(state, 1);
     for (const std::string& name : g_sim->def_name) {
         if (name.empty() || std::find(seen.begin(), seen.end(), name) != seen.end()) continue;
         seen.push_back(name);
@@ -1517,6 +1532,20 @@ void fill_live_def_stats(lua_State* state, const std::string& game_root) {
         }
         lua_pop(state, 2);
     }
+}
+
+// Host plumbing (not a Spring API): the raw unit-file def table for name, or nil.
+int ui_unit_file_table(lua_State* state) {
+    const char* name = luaL_checkstring(state, 1);
+    const std::string path = find_unit_file(g_env.game_root, name);
+    if (path.empty()) return 0;
+    if (luaL_loadfile(state, path.c_str()) != 0 || lua_pcall(state, 0, 1, 0) != 0 || !lua_istable(state, -1)) {
+        lua_pop(state, 1);
+        return 0;
+    }
+    lua_getfield(state, -1, name);
+    lua_remove(state, -2);
+    return lua_istable(state, -1) ? 1 : (lua_pop(state, 1), 0);
 }
 
 bool install_widget_handler(lua_State* state, std::string& error) {
@@ -1573,9 +1602,13 @@ bool widgets_load(lua_State* state, const WidgetEnv& env, std::string& error) {
     lua_pop(state, 1);
 
     if (!run_chunk(state, R"LUA(
-function math.round(value)
-  if value >= 0 then return math.floor(value + 0.5) end
-  return math.ceil(value - 0.5)
+-- Recoil LuaMathExtra::round: floor(x + 0.5), or round to n (0..7) decimals.
+function math.round(value, decimals)
+  if decimals == nil then return math.floor(value + 0.5) end
+  local n = math.max(0, math.min(7, math.floor(decimals)))
+  local p = 10 ^ n
+  local i = math.floor(value)
+  return i + math.floor((value - i) * p + 0.5) / p
 end
 tracy = tracy or {
   ZoneBeginN = function() end,
@@ -1729,8 +1762,7 @@ os.clock = os.clock or function() return 0 end
     set_spring(state, "SelectUnitMap", ui_select_unit_map);
     // bar-metal draws no engine selection-info text; the toggle has nothing to switch.
     set_spring(state, "SetDrawSelectionInfo", ui_noop);
-    // bar-metal UnitSim carries no per-weapon state; Spring returns nil for an unknown weapon.
-    set_spring(state, "GetUnitWeaponState", ui_noop);
+    set_spring(state, "_unitFileTable", ui_unit_file_table);
     set_spring(state, "FindUnitCmdDesc", ui_find_unit_cmd_desc);
     set_spring(state, "ValidUnitID", ui_valid_unit_id);
     set_spring(state, "GetUnitCommands", ui_get_unit_commands);
@@ -2298,10 +2330,109 @@ bool widgets_selection_changed(const std::vector<int>& unit_ids, std::string& er
 void widgets_set_sim(UnitSim* sim, const TerrainMesh* terrain) {
     g_sim = sim;
     g_terrain = terrain;
-    if (g_loaded && g_state != nullptr && sim != nullptr) {
+    static std::string s_live_key;
+    std::string live_key;
+    if (sim != nullptr) {
+        for (const std::string& nm : sim->def_name) {
+            if (live_key.find("|" + nm + "|") == std::string::npos) live_key += "|" + nm + "|";
+        }
+    }
+    if (g_loaded && g_state != nullptr && sim != nullptr && live_key != s_live_key) {
+        s_live_key = live_key;
         // Unit-file stats for the live defs, then the stock def-refresh callin
         // (gui_info LanguageChanged reruns refreshUnitInfo).
         fill_live_def_stats(g_state, g_env.game_root);
+        {
+            std::string werr;
+            if (!run_chunk(g_state, R"LUA(
+-- Recoil WeaponDef conversion of the unit file's weapondefs / weapons for live defs.
+WeaponDefs = WeaponDefs or {}
+WeaponDefNames = WeaponDefNames or {}
+local function nextWeaponID()
+  local n = -1
+  for id in pairs(WeaponDefs) do if type(id) == "number" and id > n then n = id end end
+  return n + 1
+end
+local function lowerKeys(t)
+  local out = {}
+  if type(t) == "table" then for k, v in pairs(t) do out[type(k) == "string" and k:lower() or k] = v end end
+  return out
+end
+-- Recoil customParams are strings.
+local function stringParams(t)
+  local out = {}
+  for k, v in pairs(lowerKeys(t)) do out[k] = tostring(v) end
+  return out
+end
+for _, unitName in ipairs(Spring._liveDefNames or {}) do
+  local ud = UnitDefNames[unitName]
+  local file = Spring._unitFileTable(unitName)
+  if ud and file and type(file.weapondefs) == "table" then
+    local byKey = {}
+    -- gamedata/alldefs_post: weapons_group = file value (default 0) if a weapon slot uses it, else -1.
+    local used = {}
+    for _, w in ipairs(file.weapons or {}) do if w.def then used[w.def:lower()] = true end end
+    for key, wd in pairs(file.weapondefs) do
+      wd.customparams = wd.customparams or {}
+      wd.customparams.weapons_group = used[key:lower()] and (tonumber(wd.customparams.weapons_group or 0) or 0) or -1
+    end
+    for key, wd in pairs(file.weapondefs) do
+      local name = (unitName .. "_" .. key):lower()
+      local def = WeaponDefNames[name]
+      if not def then
+        local id = nextWeaponID()
+        local dmg = lowerKeys(wd.damage)
+        local base = dmg.default or 0
+        local damages = { paralyzeDamageTime = wd.paralyzetime or 0 }
+        for i = 0, #Game.armorTypes do damages[i] = dmg[Game.armorTypes[i]] or base end
+        local shield = lowerKeys(wd.shield)
+        def = {
+          id = id, name = name, type = wd.weapontype or "Cannon",
+          range = wd.range or 0, reload = wd.reloadtime or 1,
+          salvoSize = wd.burst or 1, salvoDelay = wd.burstrate or 0.1,
+          projectiles = wd.projectiles or 1, damages = damages,
+          energyCost = wd.energypershot or 0, metalCost = wd.metalpershot or 0,
+          beamtime = wd.beamtime or 1, beamburst = wd.beamburst or false,
+          stockpile = wd.stockpile or false, stockpileTime = (wd.stockpiletime or 0) * Game.gameSpeed,
+          interceptor = wd.interceptor or 0, coverageRange = wd.coverage or 0,
+          shieldRadius = shield.radius or 0, shieldPower = shield.power or 0,
+          shieldPowerRegen = shield.powerregen or 0, shieldPowerRegenEnergy = shield.powerregenenergy or 0,
+          paralyzer = wd.paralyzer or false, minIntensity = wd.minintensity or 0, customParams = stringParams(wd.customparams),
+        }
+        WeaponDefs[id] = def
+        WeaponDefNames[name] = def
+      end
+      byKey[key:lower()] = def
+    end
+    local weapons = {}
+    for i, w in ipairs(file.weapons or {}) do
+      local def = w.def and byKey[w.def:lower()]
+      if def then
+        local only = {}
+        for cat in tostring(w.onlytargetcategory or ""):gmatch("%S+") do only[cat:lower()] = true end
+        weapons[#weapons + 1] = { weaponDef = def.id, onlyTargets = only }
+      end
+    end
+    ud.weapons = weapons
+  end
+end
+-- Weapon state for a live unit: the def values (bar-metal has no per-unit weapon modifiers).
+local stateKey = { range = "range", reloadTime = "reload", projectiles = "projectiles", burst = "salvoSize" }
+Spring.GetUnitWeaponState = function(unitID, weaponNum, key)
+  local defID = Spring.GetUnitDefID(unitID)
+  local ud = defID and UnitDefs[defID]
+  local w = ud and ud.weapons and ud.weapons[weaponNum]
+  local wd = w and WeaponDefs[w.weaponDef]
+  if not wd then return nil end
+  local field = stateKey[key]
+  if field then return wd[field] end
+  return nil
+end
+)LUA",
+                           werr)) {
+                std::cout << "weapondefs: " << werr << "\n";
+            }
+        }
         std::string error;
         g_current_widget = "bar_ui_info";
         if (!call_registry(g_state, "bar_ui_info", "LanguageChanged", nullptr, 0, false, error)) {

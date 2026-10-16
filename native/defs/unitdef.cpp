@@ -312,6 +312,22 @@ bool load_unit_health(const std::string& game_root, const std::string& def_name,
     return true;
 }
 
+std::string find_unit_file(const std::string& game_root, const std::string& def_name) {
+    const std::filesystem::path root = std::filesystem::path(game_root) / "units";
+    std::error_code ec;
+    const std::filesystem::path direct = root / (def_name + ".lua");
+    if (std::filesystem::is_regular_file(direct, ec)) return direct.string();
+    const std::string file_name = def_name + ".lua";
+    auto it = std::filesystem::recursive_directory_iterator(
+        root, std::filesystem::directory_options::skip_permission_denied, ec);
+    for (; it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        if (ec) { ec.clear(); continue; }
+        std::error_code file_ec;
+        if (it->is_regular_file(file_ec) && it->path().filename() == file_name) return it->path().string();
+    }
+    return {};
+}
+
 bool load_unit_max_weapon_range(const std::string& game_root, const std::string& def_name, float& range,
                                 std::string& error) {
     range = 0.f;

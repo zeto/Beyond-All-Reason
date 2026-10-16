@@ -62,6 +62,9 @@ struct UnitYield {
     float energy_storage = 0;
 };
 
+// Path of units/**/<name>.lua under game_root, empty when absent.
+std::string find_unit_file(const std::string& game_root, const std::string& def_name);
+
 // Loads units/<name>.lua and reads objectname. The table is the unit def itself.
 bool load_unit_object(const std::string& game_root, const std::string& def_name, std::string& object_name,
                       std::string& error);
