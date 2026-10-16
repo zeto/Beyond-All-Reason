@@ -2097,8 +2097,9 @@ bool widgets_frame(int frame, std::string& error) {
             return false;
         }
     }
-    // Skip empty build-menu chrome unless actively placing (no empty grey panel).
-    const bool draw_grid = g_grid_draw && build_cmd_state().placing;
+    // Recoil draws gridmenu whenever a builder is selected (it hides itself otherwise),
+    // and while placing.
+    const bool draw_grid = g_grid_draw && (build_cmd_state().placing || !selection_snapshot().selected.empty());
     if (draw_grid) {
         if (!call_registry(state, "bar_ui_grid", "DrawScreen", nullptr, 0, false, error)) {
             return false;
