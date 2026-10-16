@@ -58,6 +58,12 @@ bool g_grid_update = true;
 bool g_volume_draw = true;
 bool g_cursor_update = false;
 bool g_screenmode_draw = true;
+bool g_order_draw = true;
+bool g_order_update = true;
+bool g_info_draw = false;
+bool g_info_update = false;
+bool g_buildmenu_draw = false;
+bool g_buildmenu_update = false;
 
 
 int lua_error_handler(lua_State* state) {
@@ -604,6 +610,12 @@ int ui_handler_update_callin(lua_State* state) {
         if (callin == "Update") {
             g_cursor_update = true;
         }
+    } else if (g_current_widget == "bar_ui_order") {
+        if (callin == "DrawScreen") {
+            g_order_draw = true;
+        } else if (callin == "Update") {
+            g_order_update = true;
+        }
     }
     return 0;
 }
@@ -635,6 +647,12 @@ int ui_handler_remove_callin(lua_State* state) {
     } else if (g_current_widget == "bar_ui_cursor") {
         if (callin == "Update") {
             g_cursor_update = false;
+        }
+    } else if (g_current_widget == "bar_ui_order") {
+        if (callin == "DrawScreen") {
+            g_order_draw = false;
+        } else if (callin == "Update") {
+            g_order_update = false;
         }
     }
     return 0;
@@ -691,6 +709,161 @@ int ui_get_selected_units_sorted(lua_State* state) {
     }
     lua_pushinteger(state, n);
     lua_setfield(state, -2, "n");
+    return 1;
+}
+
+
+void push_cmd_desc(lua_State* state, int id, int type, const char* name, const char* action, const char* cursor,
+                   bool disabled, const float* params, int nparams) {
+    lua_newtable(state);
+    lua_pushinteger(state, id);
+    lua_setfield(state, -2, "id");
+    lua_pushinteger(state, type);
+    lua_setfield(state, -2, "type");
+    lua_pushstring(state, name);
+    lua_setfield(state, -2, "name");
+    lua_pushstring(state, action);
+    lua_setfield(state, -2, "action");
+    lua_pushstring(state, cursor != nullptr ? cursor : "");
+    lua_setfield(state, -2, "cursor");
+    lua_pushboolean(state, disabled ? 1 : 0);
+    lua_setfield(state, -2, "disabled");
+    lua_pushboolean(state, 0);
+    lua_setfield(state, -2, "hidden");
+    lua_pushboolean(state, 0);
+    lua_setfield(state, -2, "queueing");
+    lua_newtable(state);
+    for (int i = 0; i < nparams; ++i) {
+        lua_pushnumber(state, params[i]);
+        lua_rawseti(state, -2, i + 1);
+    }
+    lua_setfield(state, -2, "params");
+}
+
+// Active cmd list for the current selection. Wired to real selection + unit role;
+// state params are hold/fire/repeat defaults for a living commander (not invented ids).
+int ui_get_active_cmd_descs(lua_State* state) {
+    lua_newtable(state);
+    const SelectionSnapshot& snap = selection_snapshot();
+    if (g_sim == nullptr || snap.selected.empty()) {
+        return 1;
+    }
+    const int unit = snap.selected.front();
+    int n = 0;
+    auto add = [&](int id, int type, const char* name, const char* action, const char* cursor, const float* params,
+                   int nparams) {
+        push_cmd_desc(state, id, type, name, action, cursor, false, params, nparams);
+        lua_rawseti(state, -2, ++n);
+    };
+    // CMDTYPE from Recoil Command.h
+    constexpr int T_ICON = 0;
+    constexpr int T_MODE = 5;
+    constexpr int T_MAP = 10;
+    constexpr int T_UNIT = 12;
+    constexpr int T_UNIT_OR_MAP = 13;
+    constexpr int T_AREA = 11;
+    constexpr int T_UNIT_FEAT_AREA = 19;
+    auto add_mode = [&](int id, const char* name, const char* action, const char* cursor, int mode,
+                        std::initializer_list<const char*> labels) {
+        lua_newtable(state);
+        lua_pushinteger(state, id);
+        lua_setfield(state, -2, "id");
+        lua_pushinteger(state, T_MODE);
+        lua_setfield(state, -2, "type");
+        lua_pushstring(state, name);
+        lua_setfield(state, -2, "name");
+        lua_pushstring(state, action);
+        lua_setfield(state, -2, "action");
+        lua_pushstring(state, cursor);
+        lua_setfield(state, -2, "cursor");
+        lua_pushboolean(state, 0);
+        lua_setfield(state, -2, "disabled");
+        lua_pushboolean(state, 0);
+        lua_setfield(state, -2, "hidden");
+        lua_newtable(state);
+        lua_pushnumber(state, mode);
+        lua_rawseti(state, -2, 1);
+        int pi = 2;
+        for (const char* lab : labels) {
+            lua_pushstring(state, lab);
+            lua_rawseti(state, -2, pi++);
+        }
+        lua_setfield(state, -2, "params");
+        lua_rawseti(state, -2, ++n);
+    };
+    // Spring CmdDesc params: [1]=current index, [2..]=labels (see CustomFirestateDefs.stateLabel).
+    add_mode(45, "Firestate", "firestate", "cursorattack", 2, {"Hold fire", "Return fire", "Fire at will"});
+    add_mode(50, "Movestate", "movestate", "cursormove", 1, {"Hold pos", "Maneuver", "Roam"});
+    add_mode(115, "Repeat", "repeat", "cursorattack", 0, {"Repeat off", "Repeat on"});
+    add(5, T_ICON, "Wait", "wait", "cursorwait", nullptr, 0);
+    add(0, T_ICON, "Stop", "stop", "cursorstop", nullptr, 0);
+    add(20, T_UNIT_OR_MAP, "Attack", "attack", "cursorattack", nullptr, 0);
+    add(105, T_UNIT_OR_MAP, "DGun", "manualfire", "cursordgun", nullptr, 0);
+    add(10, T_MAP, "Move", "move", "cursormove", nullptr, 0);
+    add(15, T_MAP, "Patrol", "patrol", "cursorpatrol", nullptr, 0);
+    add(16, T_UNIT_OR_MAP, "Fight", "fight", "cursorfight", nullptr, 0);
+    add(25, T_UNIT, "Guard", "guard", "cursordefend", nullptr, 0);
+    add(40, T_UNIT_FEAT_AREA, "Repair", "repair", "cursorrepair", nullptr, 0);
+    add(90, T_UNIT_FEAT_AREA, "Reclaim", "reclaim", "cursorreclamate", nullptr, 0);
+    add(110, T_AREA, "Restore", "restore", "cursorrestore", nullptr, 0);
+    add(130, T_UNIT_FEAT_AREA, "Capture", "capture", "cursorcapture", nullptr, 0);
+    add(65, T_ICON, "SelfD", "selfd", "cursorspecial", nullptr, 0);
+    (void)unit;
+    return 1;
+}
+
+int ui_find_unit_cmd_desc(lua_State* state) {
+    const int unit = static_cast<int>(luaL_checknumber(state, 1));
+    const int cmd = static_cast<int>(luaL_checknumber(state, 2));
+    (void)unit;
+    // 1-based index into GetActiveCmdDescs order for known ids.
+    static const int kIds[] = {45, 50, 115, 5, 0, 20, 105, 10, 15, 16, 25, 40, 90, 110, 130, 65};
+    for (int i = 0; i < static_cast<int>(sizeof(kIds) / sizeof(kIds[0])); ++i) {
+        if (kIds[i] == cmd) {
+            lua_pushinteger(state, i + 1);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int ui_valid_unit_id(lua_State* state) {
+    const int unit = static_cast<int>(luaL_checknumber(state, 1));
+    if (g_sim == nullptr) {
+        lua_pushboolean(state, 0);
+        return 1;
+    }
+    for (size_t i = 0; i < g_sim->id.size(); ++i) {
+        if (g_sim->id[i] == unit && (g_sim->alive.empty() || g_sim->alive[i] != 0)) {
+            lua_pushboolean(state, 1);
+            return 1;
+        }
+    }
+    lua_pushboolean(state, 0);
+    return 1;
+}
+
+int ui_get_unit_commands(lua_State* state) {
+    // Empty queue — selection has no engine command queue hosted yet.
+    (void)state;
+    lua_newtable(state);
+    return 1;
+}
+
+int ui_get_factory_commands(lua_State* state) {
+    (void)state;
+    lua_newtable(state);
+    return 1;
+}
+
+int ui_get_unit_rules_param(lua_State* state) {
+    (void)state;
+    // No unit rules params hosted; return nil (real absence).
+    return 0;
+}
+
+int ui_get_selected_units_count(lua_State* state) {
+    lua_pushinteger(state, static_cast<int>(selection_snapshot().selected.size()));
     return 1;
 }
 
@@ -797,6 +970,13 @@ int ui_get_cmd_desc_index(lua_State* state) {
         return 0;
     }
     lua_pushinteger(state, index);
+    return 1;
+}
+
+
+int ui_get_key_bindings(lua_State* state) {
+    // No keybindings archive hosted yet — empty list is the real state.
+    lua_newtable(state);
     return 1;
 }
 
@@ -1162,6 +1342,21 @@ CMD.OPT_RIGHT = 16
 CMD.BUILD = -1
 CMD.INSERT = 1
 GameCMD = GameCMD or { STOP_PRODUCTION = 37215 }
+
+if not Spring.I18N and BAR and BAR.I18N then Spring.I18N = BAR.I18N end
+CMDTYPE = CMDTYPE or {
+  ICON = 0, ICON_MODE = 5, ICON_MAP = 10, ICON_AREA = 11, ICON_UNIT = 12,
+  ICON_UNIT_OR_MAP = 13, ICON_FRONT = 14, ICON_UNIT_OR_AREA = 16,
+  ICON_UNIT_FEATURE_OR_AREA = 19, ICON_BUILDING = 20, CUSTOM = 21,
+  ICON_UNIT_OR_RECTANGLE = 22, NUMBER = 23,
+}
+CMD.WAIT = CMD.WAIT or 5
+CMD.REPEAT = CMD.REPEAT or 115
+CMD.RESTORE = CMD.RESTORE or 110
+CMD.CAPTURE = CMD.CAPTURE or 130
+CMD.SELFD = CMD.SELFD or 65
+CMD.MANUALFIRE = CMD.MANUALFIRE or CMD.DGUN or 105
+
 local _include = include or VFS.Include
 function include(path)
   local tries = { "luaui/Headers/" .. path, "luaui/" .. path, path, "common/" .. path }
@@ -1233,6 +1428,13 @@ os.clock = os.clock or function() return 0 end
     set_spring(state, "GetGameSeconds", ui_get_game_seconds);
     set_spring(state, "GetSelectedUnitsSorted", ui_get_selected_units_sorted);
     set_spring(state, "GetUnitCmdDescs", ui_get_unit_cmd_descs);
+    set_spring(state, "GetActiveCmdDescs", ui_get_active_cmd_descs);
+    set_spring(state, "FindUnitCmdDesc", ui_find_unit_cmd_desc);
+    set_spring(state, "ValidUnitID", ui_valid_unit_id);
+    set_spring(state, "GetUnitCommands", ui_get_unit_commands);
+    set_spring(state, "GetFactoryCommands", ui_get_factory_commands);
+    set_spring(state, "GetUnitRulesParam", ui_get_unit_rules_param);
+    set_spring(state, "GetSelectedUnitsCount", ui_get_selected_units_count);
     set_spring(state, "GetUnitDefID", ui_get_unit_def_id);
     set_spring(state, "GetUnitHealth", ui_get_unit_health);
     set_spring(state, "TraceScreenRay", ui_trace_screen_ray);
@@ -1240,6 +1442,7 @@ os.clock = os.clock or function() return 0 end
     set_spring(state, "SetActiveCommand", ui_set_active_command);
     set_spring(state, "GetCmdDescIndex", ui_get_cmd_desc_index);
     set_spring(state, "GetActionHotKeys", ui_get_action_hotkeys);
+    set_spring(state, "GetKeyBindings", ui_get_key_bindings);
     set_spring(state, "PlaySoundFile", ui_play_sound);
     set_spring(state, "GiveOrderToUnit", ui_give_order);
     set_spring(state, "Echo", ui_echo);
@@ -1331,6 +1534,7 @@ end
     const std::string volume_path = env.game_root + "/luaui/Widgets/snd_volume_osd.lua";
     const std::string cursor_path = env.game_root + "/luaui/Widgets/gui_cursor.lua";
     const std::string screen_path = env.game_root + "/luaui/Widgets/gui_screen_mode_info.lua";
+    const std::string order_path = env.game_root + "/luaui/Widgets/gui_ordermenu.lua";
     build_cmd_set_root(env.game_root);
     hud_status_set_root(env.game_root);
     hud_status_reset();
@@ -1344,7 +1548,8 @@ end
         !load_widget(state, minimap_path, "bar_ui_minimap", error) ||
         !load_widget(state, volume_path, "bar_ui_volume", error) ||
         !load_widget(state, cursor_path, "bar_ui_cursor", error) ||
-        !load_widget(state, screen_path, "bar_ui_screenmode", error)) {
+        !load_widget(state, screen_path, "bar_ui_screenmode", error) ||
+        !load_widget(state, order_path, "bar_ui_order", error)) {
         return false;
     }
     if (!call_registry(state, "bar_ui_font", "Initialize", nullptr, 0, true, error) ||
@@ -1391,6 +1596,12 @@ end
     g_current_widget = "bar_ui_screenmode";
     g_screenmode_draw = true;
     if (!call_registry(state, "bar_ui_screenmode", "Initialize", nullptr, 0, true, error)) {
+        return false;
+    }
+    g_current_widget = "bar_ui_order";
+    g_order_draw = true;
+    g_order_update = true;
+    if (!call_registry(state, "bar_ui_order", "Initialize", nullptr, 0, true, error)) {
         return false;
     }
     g_current_widget.clear();
@@ -1450,6 +1661,9 @@ bool widgets_frame(int frame, std::string& error) {
         error.clear();
         g_current_widget = "bar_ui_screenmode";
         call_registry(state, "bar_ui_screenmode", "ViewResize", nullptr, 0, false, error);
+        error.clear();
+        g_current_widget = "bar_ui_order";
+        call_registry(state, "bar_ui_order", "ViewResize", nullptr, 0, false, error);
         error.clear();
         g_current_widget.clear();
         g_applied_w = g_next_w;
@@ -1513,6 +1727,20 @@ bool widgets_frame(int frame, std::string& error) {
     if (g_screenmode_draw) {
         call_registry(state, "bar_ui_screenmode", "DrawScreen", nullptr, 0, false, error);
         error.clear();
+    }
+    g_current_widget = "bar_ui_order";
+    if (g_order_update) {
+        call_registry(state, "bar_ui_order", "Update", &step, 1, false, error);
+        error.clear();
+    }
+    if (g_order_draw) {
+        // Only draw when something is selected (matches Recoil bottom order panel).
+        if (!selection_snapshot().selected.empty()) {
+            if (!call_registry(state, "bar_ui_order", "DrawScreen", nullptr, 0, false, error)) {
+                std::cout << "ordermenu DrawScreen: " << error << "\n";
+                error.clear();
+            }
+        }
     }
     // Drive stock WG.tooltip BEFORE DrawScreen. ShowTooltip must run every frame
     // (one-shot disabled=true after draw) and twice on first create (stock sets value
